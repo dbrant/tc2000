@@ -372,6 +372,37 @@ static void map_range(u32 segtab, u32 lo, u32 hi)
     }
 }
 
+/*
+ * Synthesise the master-mapper free list that the b2vme PROM would have built.
+ * Head is the global at 0xC0014038 (=0x40000000); each node holds the address
+ * of the next free slot; the last holds 0.  Stride is under test (--flstride),
+ * because the mapper geometry isn't yet pinned: _vmeaddr2paddr reads the slot
+ * from VME bits 30-25 (32MB granularity) yet the entry limit is 96 (>64), so
+ * the two readings disagree and the correct stride has to be found by
+ * observing the kernel's own use.
+ */
+/*
+ * Stride defaults to 8KB (page-granular, no 32-bit overflow across 96 slots).
+ * The mapper geometry isn't fully pinned, but the value is not yet exercised:
+ * every stride tried reaches the same next blocker, so the free list is used
+ * only as a pop-able chain here, not yet as live DMA addresses.  Revisit when
+ * the SCSI controller actually DMAs through a mapped window.
+ */
+static u32 fl_stride = 0x2000;
+
+static void build_free_list(void)
+{
+    u32 head = mem_r32(0xC0014038u);
+    if (!head) { head = 0x40000000u; mem_w32(0xC0014038u, head); }
+    u32 n = 0x60;                        /* limit at 0xC100DC58 */
+    for (u32 i = 0; i < n; i++) {
+        u32 slot = head + i * fl_stride;
+        mem_w32(slot, (i + 1 < n) ? head + (i + 1) * fl_stride : 0);
+    }
+    printf("synthetic free list: head %08x, %u entries, stride %#x\n",
+           head, n, fl_stride);
+}
+
 static void boot_build_tables(void)
 {
     mem_zero(CODE_SEGTAB, PAGE_SIZE);
@@ -931,7 +962,7 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     if (sig) printf("forcing TCS EEPROM signature '%c' at %08x\n",
                     (char)sig, force_sig_pc);
 
-    if (synth_boot) boot_build_tables();
+    if (synth_boot) { boot_build_tables(); build_free_list(); }
 
     memset(&cpu, 0, sizeof cpu);
     cpu.pc = a.entry;
@@ -1094,6 +1125,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
+        else if (!strncmp(argv[i], "--flstride=", 11)) fl_stride = (u32)strtoul(argv[i]+11,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
