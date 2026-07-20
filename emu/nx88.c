@@ -173,6 +173,7 @@ static void bitfield(u32 sub, u32 D, u32 a, u32 width, u32 offset)
 
 static inline u32 dev_read32(u32 a);    /* device-aware load  (timer, CMMU IDs) */
 static inline void dev_write32(u32 a, u32 v); /* device-aware store (CMMU commands) */
+static inline void tcs_poke(u32 a);           /* TCS mailbox handshake */
 
 /* memory-op helper shared by the immediate and triadic forms */
 static void memop(u32 sub, u32 D, u32 ea)
@@ -185,7 +186,7 @@ static void memop(u32 sub, u32 D, u32 ea)
     case 0x02: WR(D, mem_r16(ea)); break;                        /* ld.hu */
     case 0x04: WR(D, dev_read32(ea)); WR(D + 1, dev_read32(ea + 4)); break; /* ld.d */
     case 0x09: dev_write32(ea, RD(D)); break;                     /* st    */
-    case 0x0B: mem_w8(ea, (u8)RD(D)); break;                     /* st.b  */
+    case 0x0B: mem_w8(ea, (u8)RD(D)); tcs_poke(ea); break;       /* st.b  */
     case 0x0A: mem_w16(ea, (u16)RD(D)); break;                   /* st.h  */
     case 0x08: dev_write32(ea, RD(D)); dev_write32(ea + 4, RD(D + 1)); break; /* st.d */
     case 0x0C: case 0x0D: case 0x0E: case 0x0F: WR(D, ea); break;      /* lda* */
@@ -353,6 +354,41 @@ static void boot_build_tables(void)
            CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
 }
 
+/*
+ * TCS (Test and Control System) stub.
+ *
+ * The TCS is reached through a shared-memory mailbox, not port I/O.  A pointer
+ * to it sits at 0xC100CAA4 and points at 0xFE001800 in node-local device
+ * space.  The handshake, read off _tcs_get_var:
+ *
+ *     byte 0 : command.  Kernel writes it, then spins until it reads back 0,
+ *              meaning the TCS has consumed the request.
+ *     byte 5 : response flags.  Kernel spins until bit 0 is set, then clears
+ *              the byte.  Bit 1 means "error" (the caller returns 5).
+ *
+ * With no TCS present the kernel waits forever on the first spin.  This stub
+ * completes the transaction immediately and reports success, which is enough
+ * to let boot proceed; real variable payloads can be filled in as the kernel
+ * turns out to need them.
+ */
+#define TCS_MBOX 0xFE001800u
+
+static u64 tcs_commands;
+static int tcs_trace;
+
+static inline void tcs_poke(u32 a)
+{
+    if (a != TCS_MBOX) return;
+    u8 cmd = mem_r8(TCS_MBOX);
+    if (!cmd) return;
+    if (tcs_trace)
+        printf("[tcs] command %02x (args %08x %08x) -> ok\n", cmd,
+               mem_r32(TCS_MBOX + 0x10), mem_r32(TCS_MBOX + 0x14));
+    mem_w8(TCS_MBOX, 0);            /* consumed */
+    mem_w8(TCS_MBOX + 5, 1);        /* response ready, no error */
+    tcs_commands++;
+}
+
 static int cmmu_base_of(u32 a, u32 *base)
 {
     for (int i = 0; i < n_cmmu; i++)
@@ -404,6 +440,7 @@ static inline void dev_write32(u32 a, u32 v)
 {
     mem_w32(a, v);
     if (sysmode) {
+        tcs_poke(a);
         u32 base;
         if (cmmu_base_of(a, &base)) {
             u32 off = a - base;
@@ -782,11 +819,28 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     while (cpu.count < limit) {
         if (log_msgs) {
             if (cpu.pc == LOG_ROUTINE) {
-                char tag[80], fmt[160];
-                mem_cstr(RD(2), tag, sizeof tag);
+                char fmt[200];
                 mem_cstr(RD(3), fmt, sizeof fmt);
                 if (RD(3) != last_fmt) {
-                    printf("[kern] %s: %s", tag, fmt);
+                    /* format with the varargs the caller passed in r4.. */
+                    int argi = 4;
+                    printf("[kern] ");
+                    for (char *p = fmt; *p; p++) {
+                        if (*p != '%') { putchar(*p); continue; }
+                        p++;
+                        while (*p && strchr("-0123456789.l", *p)) p++;
+                        u32 v = (argi <= 9) ? RD(argi++) : 0;
+                        switch (*p) {
+                        case 'd': printf("%d", (int)v); break;
+                        case 'u': printf("%u", v); break;
+                        case 'x': printf("%x", v); break;
+                        case 'c': putchar((int)v); break;
+                        case 's': { char b[160]; mem_cstr(v, b, sizeof b);
+                                    fputs(b, stdout); } break;
+                        case '%': putchar('%'); argi--; break;
+                        default: putchar('%'); if (*p) putchar(*p); argi--;
+                        }
+                    }
                     if (!strchr(fmt, '\n')) putchar('\n');
                     last_fmt = RD(3);
                 }
@@ -870,6 +924,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
+        else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
