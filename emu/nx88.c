@@ -65,8 +65,12 @@ static u32 mem_r32(u32 a)
            ((u32)mem_r8(a+2) << 8) | mem_r8(a+3);
 }
 
+static u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
+
 static void mem_w32(u32 a, u32 v)
 {
+    if (wmem_addr && a == wmem_addr)
+        printf("[wmem] %08x <- %08x\n", a, v);
     if ((a & 4095) <= 4092) {
         u8 *p = page_of(a) + (a & 4095);
         p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
@@ -251,11 +255,46 @@ static inline u32 cmmu_id_for(u32 a)
     return (n << 24) | 0x00A00000u;
 }
 
+/*
+ * CMRAM window -- the Butterfly switch interleaver's translation RAM.
+ *
+ * Accessed through a select/data port pair rather than being directly
+ * addressable (confirmed from _cmram_interleave_setup, _interleaver_pool_rw,
+ * and _paddr2smram):
+ *
+ *     0xE07EA00C  select   -- latches which CMRAM slot the data port refers to
+ *     0xE07EB000  data     -- read/write the selected slot
+ *     0xE07EA008/010/028   -- status/ack (return "ready")
+ *
+ * Faithfully scattering interleaved (0x8xxxxxxx) memory through these
+ * descriptors is the full switch model and still to do; what this provides is
+ * coherent RAM *semantics* for the window, so a value written to a slot reads
+ * back from it.  That alone stops the master-mapper free list from being
+ * corrupted to zero (the bug that panicked "out of master mapper ram"): the
+ * data port was returning 0, so _paddr2smram wrote 0 back over the free-list
+ * head.
+ */
+#define CMRAM_SELECT 0xE07EA00Cu
+#define CMRAM_DATA   0xE07EB000u
+
+/*
+ * The select value is a full 32-bit interleaved address (e.g. 0x40000000 for
+ * the master-mapper free list, 0x82004001 for descriptor slots), so the window
+ * is keyed by the whole select and proxied to backing memory.  Reading or
+ * writing the data port therefore hits the same storage a direct access to
+ * that interleaved address would -- window and direct views stay coherent.
+ */
+static u32 cmram_sel;
+static u64 cmram_reads, cmram_writes;
+
 static inline u32 dev_read32(u32 a)
 {
     if (sysmode) {
         if (a == TIMER_ADDR) return (u32)(cpu.count * tick_scale);
         if (is_cmmu_id(a))   return cmmu_id_for(a);
+        if (a == CMRAM_DATA) { cmram_reads++; return mem_r32(cmram_sel & ~3u); }
+        if (a == 0xE07EA008u || a == 0xE07EA010u || a == 0xE07EA028u)
+            return 0;                    /* status ports: ready, no error */
     }
     return mem_r32(a);
 }
@@ -516,6 +555,10 @@ static inline u32 translate(u32 va, int code)
 
 static inline void dev_write32(u32 a, u32 v)
 {
+    if (sysmode) {
+        if (a == CMRAM_SELECT) { cmram_sel = v; return; }
+        if (a == CMRAM_DATA) { mem_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
+    }
     mem_w32(a, v);
     if (sysmode) {
         tcs_poke(a);
@@ -1050,6 +1093,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
+        else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
