@@ -176,8 +176,11 @@ static inline void dev_write32(u32 a, u32 v); /* device-aware store (CMMU comman
 static inline void tcs_poke(u32 a);           /* TCS mailbox handshake */
 
 /* memory-op helper shared by the immediate and triadic forms */
+static inline u32 translate(u32 va, int code);
+
 static void memop(u32 sub, u32 D, u32 ea)
 {
+    ea = translate(ea, 0);
     switch (sub) {
     case 0x05: WR(D, dev_read32(ea)); break;                     /* ld    */
     case 0x07: { u8 v = mem_r8(ea);  WR(D, (s32)(int8_t)v); } break;   /* ld.b  */
@@ -436,6 +439,54 @@ static void cmmu_command(u32 base, u32 cmd)
     }
 }
 
+/*
+ * Address translation.
+ *
+ * Off by default: the kernel boots to its banner without it, because early
+ * boot runs on physical addresses.  Once the kernel installs its own page
+ * tables in interleaved memory it expects translation to be live, so this is
+ * needed to go further.  Enabled with --translate.
+ *
+ * Supervisor accesses use SAPR; bit 0 of the APR is the translation-enable
+ * flag, and with it clear the address passes through untouched.  A tiny
+ * direct-mapped TLB keeps the walk off the hot path.
+ */
+static int translate_on;
+static u64 xlat_faults;
+static u32 last_fault_va, last_fault_pc;
+
+#define TLB_BITS 12
+#define TLB_SIZE (1u << TLB_BITS)
+static struct { u32 tag, pa; } tlb[2][TLB_SIZE];   /* [code/data][index] */
+
+static void tlb_flush(void)
+{
+    memset(tlb, 0, sizeof tlb);
+}
+
+static inline u32 translate(u32 va, int code)
+{
+    if (!translate_on) return va;
+    u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
+    if (!(apr & 1)) return va;                 /* translation disabled */
+
+    u32 vpn = va >> 12;
+    u32 idx = vpn & (TLB_SIZE - 1);
+    if (tlb[code][idx].tag == (vpn | 0x80000000u))
+        return tlb[code][idx].pa | (va & 0xFFF);
+
+    u32 pa;
+    if (!mmu_walk(apr, va, &pa)) {
+        xlat_faults++;
+        last_fault_va = va;
+        last_fault_pc = cpu.pc;
+        return va;                             /* fall back, keep running */
+    }
+    tlb[code][idx].tag = vpn | 0x80000000u;
+    tlb[code][idx].pa  = pa & 0xFFFFF000u;
+    return pa;
+}
+
 static inline void dev_write32(u32 a, u32 v)
 {
     mem_w32(a, v);
@@ -460,7 +511,7 @@ static int step(void)
     if (sysmode && force_sig_pc && pc == force_sig_pc)
         cpu.r[2] = force_sig_val;
 
-    u32 w   = mem_r32(pc);
+    u32 w   = mem_r32(translate(pc, 1));
     u32 op  = w >> 26;
     u32 D   = (w >> 21) & 31;
     u32 S1  = (w >> 16) & 31;
@@ -892,6 +943,10 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             putchar('\n');
         }
     }
+    printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);
+    if (translate_on)
+        printf("translation: %llu faults (last va %08x from pc %08x)\n",
+               (unsigned long long)xlat_faults, last_fault_va, last_fault_pc);
     printf("cmmu probes: %llu hit, %llu miss\n",
            (unsigned long long)probe_hits, (unsigned long long)probe_misses);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
@@ -925,6 +980,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
+        else if (!strcmp(argv[i], "--translate")) translate_on = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
