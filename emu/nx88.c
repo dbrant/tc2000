@@ -280,7 +280,78 @@ static inline u32 dev_read32(u32 a)
 #define CMMU_UAPR 0x204
 
 static int  mmu_trace;
+static u32  dump_addr;
 static u64  probe_hits, probe_misses;
+
+/*
+ * Synthetic boot loader.
+ *
+ * The tape has no bootstrap: primary boot lives in the node's C108 PROMs and
+ * the secondary loader (/stand/secboot) ships on the main distribution, not
+ * the installer.  So the kernel is entered expecting page tables that nobody
+ * built.
+ *
+ * Physical address bits 31-30 select a mode: 3 (0xC.../0xE.../0xF...) is
+ * node-local, 2 (0x8...) is interleaved/global.  The kernel is linked at
+ * 0xC0010000, which is already a valid node-local physical address -- so the
+ * mapping a boot loader would install here is simply IDENTITY.  That is what
+ * this builds, for the ranges the kernel actually touches.
+ *
+ * Segment table base addresses match what the kernel itself later writes to
+ * the APRs (0xE0790000 code, 0x803F0000 data), so its own setup is a no-op.
+ */
+#define CODE_SEGTAB 0xE0790000u
+#define DATA_SEGTAB 0x803F0000u
+#define PTPOOL      0xC1100000u          /* free space above kernel bss */
+
+static int synth_boot = 1;
+static u32 ptpool_next = PTPOOL;
+
+static void map_range(u32 segtab, u32 lo, u32 hi)
+{
+    for (u32 va = lo; va < hi; va += PAGE_SIZE) {
+        u32 sidx = (va >> 22) & 0x3FF;
+        u32 sdesc = mem_r32(segtab + sidx * 4);
+        u32 pgtab;
+        if (sdesc & 1) {
+            pgtab = sdesc & 0xFFFFF000u;
+        } else {
+            pgtab = ptpool_next;
+            ptpool_next += PAGE_SIZE;
+            mem_zero(pgtab, PAGE_SIZE);
+            mem_w32(segtab + sidx * 4, pgtab | 1);   /* valid */
+        }
+        mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, (va & 0xFFFFF000u) | 1);
+    }
+}
+
+static void boot_build_tables(void)
+{
+    mem_zero(CODE_SEGTAB, PAGE_SIZE);
+    mem_zero(DATA_SEGTAB, PAGE_SIZE);
+
+    /* kernel image, its heap/stack, and the device windows it reaches */
+    static const u32 ranges[][2] = {
+        { 0xC0000000u, 0xC1400000u },     /* kernel text, data, bss, pools */
+        { 0xE0700000u, 0xE0800000u },     /* DUART, interleaver, node ctrl */
+        { 0xFF040000u, 0xFF050000u },     /* mmu tables / stack area       */
+        { 0xFFF70000u, 0xFFF80000u },     /* CMMU register windows         */
+    };
+    for (unsigned i = 0; i < sizeof ranges / sizeof ranges[0]; i++) {
+        map_range(CODE_SEGTAB, ranges[i][0], ranges[i][1]);
+        map_range(DATA_SEGTAB, ranges[i][0], ranges[i][1]);
+    }
+
+    /* pre-load the APRs exactly as the kernel will later write them */
+    for (int i = 0; i < n_cmmu; i++) {
+        u32 tab = (cmmu_present[i] == 0xFFF7F000u) ? CODE_SEGTAB : DATA_SEGTAB;
+        mem_w32(cmmu_present[i] + CMMU_SAPR, tab | 1);
+        mem_w32(cmmu_present[i] + CMMU_UAPR, DATA_SEGTAB | 1);
+    }
+    printf("synthetic boot: identity tables at %08x (code) / %08x (data), "
+           "%u page tables\n",
+           CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
+}
 
 static int cmmu_base_of(u32 a, u32 *base)
 {
@@ -334,8 +405,13 @@ static inline void dev_write32(u32 a, u32 v)
     mem_w32(a, v);
     if (sysmode) {
         u32 base;
-        if (cmmu_base_of(a, &base) && (a - base) == CMMU_SCR)
-            cmmu_command(base, v);
+        if (cmmu_base_of(a, &base)) {
+            u32 off = a - base;
+            if (off == CMMU_SCR) cmmu_command(base, v);
+            else if (mmu_trace && (off == CMMU_SAPR || off == CMMU_UAPR))
+                printf("[cmmu] %08x %s <- %08x   (pc=%08x)\n", base,
+                       off == CMMU_SAPR ? "SAPR" : "UAPR", v, cpu.pc);
+        }
     }
 }
 
@@ -691,6 +767,8 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     if (sig) printf("forcing TCS EEPROM signature '%c' at %08x\n",
                     (char)sig, force_sig_pc);
 
+    if (synth_boot) boot_build_tables();
+
     memset(&cpu, 0, sizeof cpu);
     cpu.pc = a.entry;
     WR(31, DATA_BASE + a.data + a.bss + 0x8000);
@@ -751,6 +829,15 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
         putchar('\n');
     }
+    if (dump_addr) {
+        printf("memory at %08x:\n", dump_addr);
+        for (int k = 0; k < 4; k++) {
+            printf("  %08x ", dump_addr + k * 16);
+            for (int j = 0; j < 16; j += 4)
+                printf(" %08x", mem_r32(dump_addr + k * 16 + j));
+            putchar('\n');
+        }
+    }
     printf("cmmu probes: %llu hit, %llu miss\n",
            (unsigned long long)probe_hits, (unsigned long long)probe_misses);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
@@ -783,6 +870,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
+        else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
