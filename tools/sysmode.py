@@ -23,6 +23,7 @@ KERNEL = r"e:\git\tc2000\tapeimage\vmunix"
 TEXT_BASE = 0xC0010000
 DATA_BASE = 0xC1000000
 HDR = 8192
+TICK_SCALE = 2000     # microseconds of "hardware time" per instruction
 
 
 class WatchedMemory(Memory):
@@ -34,6 +35,7 @@ class WatchedMemory(Memory):
         self.foreign = collections.Counter()
         self.first_touch = {}
         self.console = []
+        self.ticks = 0
         self.pc = 0
 
     def map_region(self, lo, size, name):
@@ -47,8 +49,17 @@ class WatchedMemory(Memory):
         self.foreign[region] += 1
         self.first_touch.setdefault(region, (self.pc, addr))
 
+    # 0xE07E8018 is a free-running counter.  _slaves_remaining() reads it,
+    # adds (timeout * 1000), then polls until the difference goes negative --
+    # so a memory that always reads zero makes every timed wait hang forever.
+    # Ticking it is what lets the boot proceed, and it is real hardware rather
+    # than a hook, so any other delay loop on the same counter works too.
+    TIMER = 0xE07E8018
+
     def read(self, addr, n):
         self._check(addr)
+        if addr == self.TIMER and n == 4:
+            return struct.pack(">I", self.ticks & 0xFFFFFFFF)
         return super().read(addr, n)
 
     def write(self, addr, data):
@@ -90,6 +101,7 @@ def main(argv):
     try:
         while cpu.count < limit:
             mem.pc = cpu.pc
+            mem.ticks = cpu.count * TICK_SCALE
             cpu.step()
     except Trap as t:
         reason = "trap vector %d" % t.vector
