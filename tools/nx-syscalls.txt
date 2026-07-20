@@ -1,0 +1,229 @@
+   1  -      nosys
+   2  0 args fork                     c004d188
+   3  3 args read                     c004e070
+   4  3 args write                    c005bb00
+   5  3 args open                     c005bbfc
+   6  1 args close                    c0077318
+   7  4 args wait4                    c004b928
+   8  2 args creat                    c004d8e8
+   9  2 args link                     c0077368
+  10  1 args unlink                   c0077884
+  11  2 args execv                    c0077a60
+  12  1 args chdir                    c004c2d8
+  13  0 args mknod                    c0077140
+  14  -      nosys
+  15  2 args chmod                    c00774e8
+  16  3 args chown                    c0078568
+  17  1 args obreak                   c007862c
+  18  0 args lseek                    c004ebb4
+  19  -      nosys
+  20  0 args getpid                   c0077eac
+  21  0 args umount                   c004ff68
+  22  -      nosys
+  23  0 args getuid                   c0085148
+  24  -      nosys
+  25  0 args ptrace                   c0050060
+  26  -      nosys
+  27  0 args access                   c005caf8
+  28  -      nosys
+  29  -      nosys
+  30  -      nosys
+  31  -      nosys
+  32  -      nosys
+  33  -      nosys
+  34  0 args sync                     c007808c
+  35  -      nosys
+  36  -      nosys
+  37  2 args kill                     c0071968
+  38  2 args old_stat                 c005218c
+  39  0 args old_lstat                c0078238
+  40  -      nosys
+  41  2 args dup                      c00782b0
+  42  0 args pipe                     c004af24
+  43  0 args profil                   c006f628
+  44  -      nosys
+  45  0 args getgid                   c004a5c8
+  46  -      nosys
+  47  -      nosys
+  48  0 args sysacct                  c00500b0
+  49  -      nosys
+  50  -      nosys
+  51  -      nosys
+  52  0 args ioctl                    c0048f68
+  53  -      nosys
+  54  -      nosys
+  55  1 args reboot                   c005bf8c
+  56  0 args symlink                  c00587d8
+  57  -      nosys
+  58  3 args readlink                 c0077914
+  59  3 args execve                   c0078460
+  60  1 args umask                    c004c310
+  61  1 args chroot                   c0078b28
+  62  2 args old_fstat                c00771b0
+  63  0 args getpagesize              c004ba18
+  64  -      nosys
+  65  5 args mremap                   c004ea50
+  66  0 args vfork                    c004eaac
+  67  3 args sbrk                     c004e0b4
+  68  3 args write                    c005bb00
+  69  1 args open                     c005bbfc
+  70  1 args sstk                     c004ea00
+  71  6 args smmap                    c004ea28
+  72  1 args ovadvise                 c004ea84
+  73  2 args munmap                   c004ed84
+  74  3 args mprotect                 c004ead4
+  75  3 args madvise                  c004eb3c
+  76  1 args vhangup                  c004eb64
+  77  0 args mincore                  c0078b78
+  78  -      nosys
+  79  2 args getgroups                c004eb8c
+  80  2 args setgroups                c0050100
+  81  1 args getpgrp                  c0050c20
+  82  2 args setpgrp                  c004ffb8
+  83  3 args setitimer                c00503bc
+  84  0 args wait                     c0057f5c
+  85  0 args getitimer                c004d9b0
+  86  -      nosys
+  87  2 args gethostname              c0057e24
+  88  2 args sethostname              c00585a0
+  89  0 args getdtablesize            c0058618
+  90  2 args dup2                     c004aea0
+  91  2 args getdopt                  c004afe8
+  92  3 args fcntl                    c004aed4
+  93  5 args select                   c004b1ac
+  94  2 args setdopt                  c005c23c
+  95  1 args fsync                    c004aefc
+  96  3 args setpriority              c0078aa4
+  97  3 args socket                   c0051388
+  98  3 args connect                  c006de10
+  99  3 args accept                   c006e544
+ 100  2 args getpriority              c006dff4
+ 101  4 args send                     c00511e0
+ 102  4 args recv                     c006eb24
+ 103  2 args sigreturn                c006ef1c
+ 104  3 args bind                     c00a1dd8
+ 105  5 args setsockopt               c006dee8
+ 106  2 args listen                   c006f394
+ 107  0 args sigvec                   c006df90
+ 108  -      nosys
+ 109  1 args sigblock                 c0051b78
+ 110  1 args sigsetmask               c0051f58
+ 111  1 args sigpause                 c0051fd0
+ 112  2 args sigstack                 c0052040
+ 113  3 args recvmsg                  c00520b8
+ 114  3 args sendmsg                  c006ef94
+ 115  0 args gettimeofday             c006eb94
+ 116  -      nosys
+ 117  2 args getrusage                c0057990
+ 118  5 args getsockopt               c005195c
+ 119  3 args getrusage2               c006f4a8
+ 120  3 args readv                    c005199c
+ 121  3 args writev                   c005bb60
+ 122  2 args settimeofday             c005bc5c
+ 123  3 args fchown                   c0057a34
+ 124  2 args fchmod                   c0078694
+ 125  6 args recvfrom                 c00785cc
+ 126  2 args setreuid                 c006ee64
+ 127  2 args setregid                 c0050758
+ 128  2 args rename                   c00509b4
+ 129  2 args truncate                 c00778cc
+ 130  2 args ftruncate                c00787b0
+ 131  2 args flock                    c007882c
+ 132  0 args sendto                   c004c1f0
+ 133  -      nosys
+ 134  2 args shutdown                 c006eaac
+ 135  5 args socketpair               c006f330
+ 136  2 args mkdir                    c006e868
+ 137  1 args rmdir                    c00777c8
+ 138  2 args utimes                   c0077aa8
+ 139  0 args osigcleanup              c00786f8
+ 140  2 args adjtime                  c00a2018
+ 141  3 args getpeername              c0057bb8
+ 142  0 args gethostid                c006fafc
+ 143  1 args sethostid                c0058518
+ 144  2 args getrlimit                c0058550
+ 145  2 args setrlimit                c00518ec
+ 146  2 args killpg                   c0051630
+ 147  0 args oldquota                 c0052390
+ 148  -      nosys
+ 149  0 args getsockname              c007a978
+ 150  3 args getsockname              c007a978
+ 151  2 args sys_bbn                  c006f840
+ 152  0 args getdirentries            c00502e0
+ 153  -      nosys
+ 154  -      nosys
+ 155  -      nosys
+ 156  4 args getsock                  c002b178
+ 157  2 args statfs                   c0077af0
+ 158  2 args fstatfs                  c00719d8
+ 159  1 args unmount                  c0071a60
+ 160  0 args getdomainname            c0071b68
+ 161  2 args run_async_daemons        c0033880
+ 162  2 args getf                     c002a87c
+ 163  2 args setdomainname            c00586bc
+ 164  0 args quotactl                 c0058734
+ 165  -      nosys
+ 166  2 args smount                   c007a818
+ 167  4 args lookupname               c002a470
+ 168  2 args ustat                    c00713e8
+ 169  0 args getdents                 c0079c70
+ 170  -      nosys
+ 171  -      nosys
+ 172  -      nosys
+ 173  -      nosys
+ 174  -      nosys
+ 175  0 args multread                 c0078d50
+ 176  -      nosys
+ 177  -      nosys
+ 178  -      nosys
+ 179  -      nosys
+ 180  3 args multwrite                c0058868
+ 181  1 args user_yield               c0058898
+ 182  2 args user_nopreempt           c0056c24
+ 183  3 args vnode_pager_ctl          c0056f00
+ 184  1 args user_wakeup              c0056624
+ 185  0 args user_elog                c0056b64
+ 186  -      nosys
+ 187  2 args stat                     c0098344
+ 188  2 args lstat                    c00781fc
+ 189  2 args fstat                    c0078274
+ 190  6 args mkionode                 c004ba48
+ 191  0 args setposix                 c0077670
+ 192  1 args sigpending               c0058824
+ 193  3 args sigprocmask              c0053d4c
+ 194  3 args waitpid                  c0053c34
+ 195  0 args setsid                   c004d834
+ 196  0 args cmusysent                c0050640
+ 197  1 args table                    c0046e48
+ 198  0 args PRIVMODES                c0046db0
+ 199  -      nosys
+ 200  0 args heap_kmem_init           c0046e80
+ 201  -      nosys
+ 202  -      nosys
+ 203  0 args nsysent                  c005b984
+ 204  1 args setmodes                 c0046d78
+ 205  0 args getaid                   c0046d28
+ 206  0 args <00000009>               00000009
+ 207  26623 args <00000000>               00000000
+ 208  10207 args <243f0014>               243f0014
+ 209  10175 args <63df0010>               63df0010
+ 210  23968 args <237f0000>               237f0000
+ 211  51200 args <176de12c>               176de12c
+ 212  62785 args <f4205802>               f4205802
+ 213  23968 args <d84a0056>               d84a0056
+ 214  62793 args <152def78>               152def78
+ 215  23968 args <d84a0007>               d84a0007
+ 216  23968 args <150def78>               150def78
+ 217  23968 args <250def7c>               250def7c
+ 218  5371 args <240def78>               240def78
+ 219  55402 args <f5477d00>               f5477d00
+ 220  5325 args <5da0c101>               5da0c101
+ 221  5311 args <24df000c>               24df000c
+ 222  55370 args <f5457d00>               f5457d00
+ 223  51200 args <145f000c>               145f000c
+ 224  9229 args <5da0c101>               5da0c101
+ 225  5211 args <c000003e>               c000003e
+ 226  22656 args <58600000>               58600000
+ 227  24799 args <58a00000>               58a00000
+ 228  62496 args <c800b4f7>               c800b4f7
+ 229  11309 args <5da0fbff>               5da0fbff

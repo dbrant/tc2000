@@ -72,12 +72,18 @@ def describe_trap(cpu, t, mem):
 # trapping through `tb0 0, r0, 128`; the result comes back in r2.
 MASK_ERR = 0xFFFFFFFF
 
-SYS = {0: "indir", 64: "getpagesize", 1: "exit", 2: "fork", 3: "read", 4: "write", 5: "open", 6: "close",
-       17: "brk", 19: "lseek", 20: "getpid", 33: "access", 38: "stat",
-       54: "ioctl", 62: "fstat", 73: "munmap", 108: "sigvec",
-       109: "sigblock", 110: "sigsetmask", 116: "gettimeofday",
-       120: "readv", 121: "writev", 24: "getuid", 47: "getgid",
-       36: "sync", 39: "getppid", 49: "getlogin"}
+# Numbers recovered from the kernel's own sysent table (see syscalls.py and
+# nx-syscalls.txt).  nX kept 4.3BSD's stat/lstat/fstat at 38/39/62 as
+# `old_*` compat entries and added new ones at 187/188/189 for its wider
+# struct stat -- which is why tape binaries call those high numbers.
+SYS = {0: "indir", 1: "exit", 2: "fork", 3: "read", 4: "write", 5: "open",
+       6: "close", 17: "obreak", 19: "lseek", 20: "getpid", 23: "getuid",
+       27: "access", 35: "sync", 38: "old_stat", 39: "old_lstat",
+       45: "getgid", 52: "ioctl", 62: "old_fstat", 64: "getpagesize",
+       67: "sbrk", 107: "sigvec", 108: "sigvec", 109: "sigblock",
+       110: "sigsetmask", 115: "gettimeofday", 116: "gettimeofday",
+       120: "readv", 121: "writev", 152: "getdirentries",
+       187: "stat", 188: "lstat", 189: "fstat"}
 
 
 class Kernel:
@@ -167,8 +173,8 @@ class Kernel:
             self.unknown.add(n)
             ret = 0
         if self.verbose:
-            print("    [syscall %-12s (%s) = %d]"
-                  % (name, ", ".join("%#x" % x for x in a[:4]), ret),
+            print("    [syscall %3d %-12s (%s) = %d]"
+                  % (n, name, ", ".join("%#x" % x for x in a[:4]), ret),
                   file=sys.stderr)
         cpu.set(2, ret)
 
