@@ -323,6 +323,7 @@ static inline u32 dev_read32(u32 a)
 #define CMMU_UAPR 0x204
 
 static int  mmu_trace;
+static int  batc_trace;
 static u32  dump_addr;
 static u32  findpt_va;
 static u32  watch_pc;
@@ -348,7 +349,9 @@ static u64  probe_hits, probe_misses;
 #define CODE_SEGTAB 0xE0790000u
 
 #define DATA_SEGTAB 0x803F0000u
-#define PTPOOL      0xC1100000u          /* free space above kernel bss */
+#define PTPOOL      0xDF000000u          /* above the kernel's memory, so the
+                                            kernel's own dynamic allocations can
+                                            never overwrite our page tables */
 
 static int synth_boot = 1;
 static u32 ptpool_next = PTPOOL;
@@ -410,7 +413,7 @@ static void boot_build_tables(void)
 
     /* kernel image, its heap/stack, and the device windows it reaches */
     static const u32 ranges[][2] = {
-        { 0xC0000000u, 0xC1400000u },     /* kernel text, data, bss, pools */
+        { 0xC0000000u, 0xD0000000u },     /* kernel text, data, bss, dynamic kmem */
         { 0xE0700000u, 0xE0800000u },     /* DUART, interleaver, node ctrl */
         { 0xFF040000u, 0xFF050000u },     /* mmu tables / stack area       */
         { 0xFFF70000u, 0xFFF80000u },     /* CMMU register windows         */
@@ -587,6 +590,11 @@ static inline u32 translate(u32 va, int code)
 static inline void dev_write32(u32 a, u32 v)
 {
     if (sysmode) {
+        {
+            u32 cb;
+            if (batc_trace && cmmu_base_of(a, &cb) && (a - cb) >= 0x400 && (a - cb) < 0x500)
+                printf("[batc] %08x off=0x%x <- %08x\n", a, a - cb, v);
+        }
         if (a == CMRAM_SELECT) { cmram_sel = v; return; }
         if (a == CMRAM_DATA) { mem_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
     }
@@ -1117,6 +1125,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
+        else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;
         else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
