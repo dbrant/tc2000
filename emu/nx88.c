@@ -44,9 +44,29 @@ typedef uint64_t u64;
 
 static u8 **pages;
 
+/*
+ * Real-memory model (--realmm): the kernel runs at true physical addresses.
+ * On a single node the switch's interleaved view (mode bit 0x80000000) and the
+ * node-local view alias the same RAM, so interleaved physical addresses
+ * 0x80000000-0xBFFFFFFF fold onto node-local 0x00000000-0x3FFFFFFF.  Doing this
+ * in page_of() -- the one backing-store choke point -- keeps CPU accesses,
+ * page-table walks, and the CMRAM window automatically coherent: a PTE written
+ * to node-local 0x110000 (via the kernel's direct map) is the same byte the
+ * walk reads when the APR points at interleaved 0x80110000.
+ */
+static int realmm;
+static int dbg_trans;
+
+static inline u32 cphys(u32 a)
+{
+    if (realmm && a >= 0x80000000u && a < 0xC0000000u)
+        return a & 0x7FFFFFFFu;
+    return a;
+}
+
 static inline u8 *page_of(u32 a)
 {
-    u32 i = a >> 12;
+    u32 i = cphys(a) >> 12;
     u8 *p = pages[i];
     if (!p) { p = calloc(1, PAGE_SIZE); pages[i] = p; }
     return p;
@@ -66,11 +86,18 @@ static u32 mem_r32(u32 a)
 }
 
 static u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
+static u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range */
+static u32 dbg_pc;                    /* current pc, for trace prints */
+static u64 dbg_count;                 /* current instruction count */
 
 static void mem_w32(u32 a, u32 v)
 {
     if (wmem_addr && a == wmem_addr)
-        printf("[wmem] %08x <- %08x\n", a, v);
+        printf("[wmem] %08x <- %08x  pc=%08x @%llu\n", a, v, dbg_pc,
+               (unsigned long long)dbg_count);
+    if (wmem_hi && a >= wmem_lo && a < wmem_hi)
+        printf("[wrange] %08x <- %08x  pc=%08x @%llu\n", a, v, dbg_pc,
+               (unsigned long long)dbg_count);
     if ((a & 4095) <= 4092) {
         u8 *p = page_of(a) + (a & 4095);
         p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
@@ -184,6 +211,10 @@ static inline u32 translate(u32 va, int code);
 
 static void memop(u32 sub, u32 D, u32 ea)
 {
+    /* lda computes an effective ADDRESS only -- it does not access memory, so
+       it must return the untranslated virtual address.  Everything else
+       translates before touching memory. */
+    if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
     ea = translate(ea, 0);
     switch (sub) {
     case 0x05: WR(D, dev_read32(ea)); break;                     /* ld    */
@@ -196,7 +227,6 @@ static void memop(u32 sub, u32 D, u32 ea)
     case 0x0B: mem_w8(ea, (u8)RD(D)); tcs_poke(ea); break;       /* st.b  */
     case 0x0A: mem_w16(ea, (u16)RD(D)); break;                   /* st.h  */
     case 0x08: dev_write32(ea, RD(D)); dev_write32(ea + 4, RD(D + 1)); break; /* st.d */
-    case 0x0C: case 0x0D: case 0x0E: case 0x0F: WR(D, ea); break;      /* lda* */
     case 0x01: { u32 old = mem_r32(ea); mem_w32(ea, RD(D)); WR(D, old); } break;
     case 0x00: { u8  old = mem_r8(ea);  mem_w8(ea, (u8)RD(D)); WR(D, old); } break;
     }
@@ -357,7 +387,11 @@ static int synth_boot = 1;
 static u32 ptpool_next = PTPOOL;
 static u32 seed_mapper;
 
-static void map_range(u32 segtab, u32 lo, u32 hi)
+/* Map [lo,hi) with PTE physical = va - off.  off=0 gives identity (device
+   windows); off=0xC0000000 gives the kernel's direct map (VA 0xC0000000->PA 0),
+   which is what --realmm needs so the kernel's own PTE writes land at real
+   node-0 physical addresses. */
+static void map_range_off(u32 segtab, u32 lo, u32 hi, u32 off)
 {
     for (u32 va = lo; va < hi; va += PAGE_SIZE) {
         u32 sidx = (va >> 22) & 0x3FF;
@@ -371,9 +405,11 @@ static void map_range(u32 segtab, u32 lo, u32 hi)
             mem_zero(pgtab, PAGE_SIZE);
             mem_w32(segtab + sidx * 4, pgtab | 1);   /* valid */
         }
-        mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, (va & 0xFFFFF000u) | 1);
+        mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, ((va - off) & 0xFFFFF000u) | 1);
     }
 }
+
+static void map_range(u32 segtab, u32 lo, u32 hi) { map_range_off(segtab, lo, hi, 0); }
 
 /*
  * Synthesise the master-mapper free list that the b2vme PROM would have built.
@@ -406,21 +442,27 @@ static void build_free_list(void)
            head, n, fl_stride);
 }
 
+#define KOFF 0xC0000000u                  /* kernel VA -> PA offset (VA 0xC0000000 -> PA 0) */
+
 static void boot_build_tables(void)
 {
     mem_zero(CODE_SEGTAB, PAGE_SIZE);
     mem_zero(DATA_SEGTAB, PAGE_SIZE);
 
-    /* kernel image, its heap/stack, and the device windows it reaches */
-    static const u32 ranges[][2] = {
-        { 0xC0000000u, 0xD0000000u },     /* kernel text, data, bss, dynamic kmem */
+    /* device windows are identity-mapped (fixed physical); kernel RAM uses the
+       direct map (VA-KOFF) under --realmm, identity otherwise */
+    static const u32 devs[][2] = {
         { 0xE0700000u, 0xE0800000u },     /* DUART, interleaver, node ctrl */
         { 0xFF040000u, 0xFF050000u },     /* mmu tables / stack area       */
         { 0xFFF70000u, 0xFFF80000u },     /* CMMU register windows         */
     };
-    for (unsigned i = 0; i < sizeof ranges / sizeof ranges[0]; i++) {
-        map_range(CODE_SEGTAB, ranges[i][0], ranges[i][1]);
-        map_range(DATA_SEGTAB, ranges[i][0], ranges[i][1]);
+    u32 koff = realmm ? KOFF : 0;
+    /* kernel space: 0xC0000000-0xE0000000 -> PA 0-0x20000000 (realmm) or identity */
+    map_range_off(CODE_SEGTAB, 0xC0000000u, 0xE0000000u, koff);
+    map_range_off(DATA_SEGTAB, 0xC0000000u, 0xE0000000u, koff);
+    for (unsigned i = 0; i < sizeof devs / sizeof devs[0]; i++) {
+        map_range(CODE_SEGTAB, devs[i][0], devs[i][1]);
+        map_range(DATA_SEGTAB, devs[i][0], devs[i][1]);
     }
 
     /* pre-load the APRs exactly as the kernel will later write them */
@@ -430,8 +472,8 @@ static void boot_build_tables(void)
         mem_w32(cmmu_present[i] + CMMU_UAPR, DATA_SEGTAB | 1);
     }
     if (seed_mapper) mem_w32(0xC0014038u, seed_mapper);
-    printf("synthetic boot: identity tables at %08x (code) / %08x (data), "
-           "%u page tables\n",
+    printf("synthetic boot: %s map, tables at %08x (code) / %08x (data), "
+           "%u page tables\n", realmm ? "direct(VA-0xC0000000)" : "identity",
            CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
 }
 
@@ -502,7 +544,7 @@ static int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
 {
     u32 segtab = apr & 0xFFFFF000u;
     if (!segtab) return 0;
-    if (ileave_stub && (segtab & 0xC0000000u) == 0x80000000u &&
+    if (ileave_stub && !realmm && (segtab & 0xC0000000u) == 0x80000000u &&
         !mem_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4)) {
         segtab = DATA_SEGTAB;
         ileave_redirects++;
@@ -577,10 +619,18 @@ static inline u32 translate(u32 va, int code)
 
     u32 pa;
     if (!mmu_walk(apr, va, &pa)) {
+        /* device space (>= 0xE0000000) is fixed-physical, identity-mapped --
+           don't require page tables for it */
+        if (realmm && va >= 0xE0000000u) return va;
         xlat_faults++;
         last_fault_va = va;
         last_fault_pc = cpu.pc;
-        return va;                             /* fall back, keep running */
+        /* realmm has no identity fallback -- a miss is a genuine unmapped
+           access; log the first few so we can see where it happens */
+        if (realmm && xlat_faults <= 20)
+            printf("[xlat MISS] va=%08x pc=%08x apr=%08x @%llu\n",
+                   va, cpu.pc, apr, (unsigned long long)cpu.count);
+        return realmm ? cphys(va) : va;
     }
     tlb[code][idx].tag = vpn | 0x80000000u;
     tlb[code][idx].pa  = pa & 0xFFFFF000u;
@@ -616,6 +666,7 @@ static inline void dev_write32(u32 a, u32 v)
 static int step(void)
 {
     u32 pc = cpu.pc;
+    dbg_pc = pc; dbg_count = cpu.count;
 
     if (sysmode && force_sig_pc && pc == force_sig_pc)
         cpu.r[2] = force_sig_val;
@@ -738,6 +789,14 @@ static int step(void)
         }
     } else {
         goto badinsn;
+    }
+
+    if (realmm && dbg_trans && pc >= 0xC0000000u) {
+        u32 npc = (cpu.has_pending) ? cpu.pending
+                : taken ? (delayed ? next_pc : branch) : next_pc;
+        if (npc < 0xC0000000u && npc >= 0x8000u && npc < 0xE0000000u)
+            printf("[VA->phys] %08x (%s) -> %08x\n", pc,
+                   taken ? "branch" : "fall", npc);
     }
 
     /* --- sequencing: delay slots are explicit --- */
@@ -961,12 +1020,15 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     force_sig_pc  = sig ? 0xC00A851Cu : 0;
     force_sig_val = sig;
 
-    mem_load(TEXT_BASE, a.img + HDR_PAGE, a.text);
-    mem_load(DATA_BASE, a.img + HDR_PAGE + a.text, a.data);
-    mem_zero(DATA_BASE + a.data, a.bss);
+    /* realmm loads at true physical addresses (VA - KOFF); otherwise identity */
+    u32 tload = realmm ? TEXT_BASE - KOFF : TEXT_BASE;
+    u32 dload = realmm ? DATA_BASE - KOFF : DATA_BASE;
+    mem_load(tload, a.img + HDR_PAGE, a.text);
+    mem_load(dload, a.img + HDR_PAGE + a.text, a.data);
+    mem_zero(dload + a.data, a.bss);
 
-    printf("kernel: text %u @ %08x  data %u @ %08x  bss %u  entry %08x\n",
-           a.text, TEXT_BASE, a.data, DATA_BASE, a.bss, a.entry);
+    printf("kernel: text %u @ phys %08x  data %u @ phys %08x  bss %u  entry %08x\n",
+           a.text, tload, a.data, dload, a.bss, a.entry);
     if (sig) printf("forcing TCS EEPROM signature '%c' at %08x\n",
                     (char)sig, force_sig_pc);
 
@@ -1128,12 +1190,18 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;
+        else if (!strcmp(argv[i], "--realmm")) { realmm = 1; translate_on = 1; ileave_stub = 1; }
+        else if (!strcmp(argv[i], "--dbgtrans")) dbg_trans = 1;
         else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
+        else if (!strncmp(argv[i], "--wrange=", 9)) {
+            wmem_lo = (u32)strtoul(argv[i]+9,0,0);
+            char *c = strchr(argv[i]+9, ':'); wmem_hi = c ? (u32)strtoul(c+1,0,0) : wmem_lo+0x1000;
+        }
         else if (!strncmp(argv[i], "--flstride=", 11)) fl_stride = (u32)strtoul(argv[i]+11,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
