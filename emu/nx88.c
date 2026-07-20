@@ -171,7 +171,8 @@ static void bitfield(u32 sub, u32 D, u32 a, u32 width, u32 offset)
     }
 }
 
-static inline u32 dev_read32(u32 a);   /* device-aware load (timer, CMMU IDs) */
+static inline u32 dev_read32(u32 a);    /* device-aware load  (timer, CMMU IDs) */
+static inline void dev_write32(u32 a, u32 v); /* device-aware store (CMMU commands) */
 
 /* memory-op helper shared by the immediate and triadic forms */
 static void memop(u32 sub, u32 D, u32 ea)
@@ -183,10 +184,10 @@ static void memop(u32 sub, u32 D, u32 ea)
     case 0x06: { u16 v = mem_r16(ea); WR(D, (s32)(int16_t)v); } break; /* ld.h */
     case 0x02: WR(D, mem_r16(ea)); break;                        /* ld.hu */
     case 0x04: WR(D, dev_read32(ea)); WR(D + 1, dev_read32(ea + 4)); break; /* ld.d */
-    case 0x09: mem_w32(ea, RD(D)); break;                        /* st    */
+    case 0x09: dev_write32(ea, RD(D)); break;                     /* st    */
     case 0x0B: mem_w8(ea, (u8)RD(D)); break;                     /* st.b  */
     case 0x0A: mem_w16(ea, (u16)RD(D)); break;                   /* st.h  */
-    case 0x08: mem_w32(ea, RD(D)); mem_w32(ea + 4, RD(D + 1)); break;  /* st.d */
+    case 0x08: dev_write32(ea, RD(D)); dev_write32(ea + 4, RD(D + 1)); break; /* st.d */
     case 0x0C: case 0x0D: case 0x0E: case 0x0F: WR(D, ea); break;      /* lda* */
     case 0x01: { u32 old = mem_r32(ea); mem_w32(ea, RD(D)); WR(D, old); } break;
     case 0x00: { u8  old = mem_r8(ea);  mem_w8(ea, (u8)RD(D)); WR(D, old); } break;
@@ -253,6 +254,89 @@ static inline u32 dev_read32(u32 a)
         if (is_cmmu_id(a))   return cmmu_id_for(a);
     }
     return mem_r32(a);
+}
+
+/*
+ * MC88200 register offsets, as used by the kernel's own probe routine
+ * (_full_svtop):
+ *
+ *    +0x004  SCR   system command   (0x24 = probe supervisor address)
+ *    +0x008  SSR   system status    (bit 0 = translation valid)
+ *    +0x00C  SAR   search address   (written with the VA, read back as PA)
+ *    +0x108  PFAR  page fault address
+ *    +0x200  SAPR  supervisor area pointer
+ *    +0x204  UAPR  user area pointer
+ *    +0x400  BWP0..7 batc write ports
+ *
+ * Everything except the command register behaves as ordinary memory, so only
+ * the SCR write needs intercepting: it runs the two-level table walk and
+ * deposits the answer where the kernel expects to read it.
+ */
+#define CMMU_SCR  0x004
+#define CMMU_SSR  0x008
+#define CMMU_SAR  0x00C
+#define CMMU_PFAR 0x108
+#define CMMU_SAPR 0x200
+#define CMMU_UAPR 0x204
+
+static int  mmu_trace;
+static u64  probe_hits, probe_misses;
+
+static int cmmu_base_of(u32 a, u32 *base)
+{
+    for (int i = 0; i < n_cmmu; i++)
+        if (a >= cmmu_present[i] && a < cmmu_present[i] + 0x1000) {
+            *base = cmmu_present[i];
+            return 1;
+        }
+    return 0;
+}
+
+/* Two-level MC88200 walk: area pointer -> segment table -> page table. */
+static int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
+{
+    u32 segtab = apr & 0xFFFFF000u;
+    if (!segtab) return 0;
+    u32 sdesc = mem_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4);
+    if (!(sdesc & 1)) return 0;                       /* segment invalid */
+    u32 pgtab = sdesc & 0xFFFFF000u;
+    u32 pdesc = mem_r32(pgtab + ((vaddr >> 12) & 0x3FF) * 4);
+    if (!(pdesc & 1)) return 0;                       /* page invalid */
+    *phys = (pdesc & 0xFFFFF000u) | (vaddr & 0xFFF);
+    return 1;
+}
+
+static void cmmu_command(u32 base, u32 cmd)
+{
+    /* 0x20/0x24 are the user/supervisor address-probe commands */
+    if (cmd != 0x20 && cmd != 0x24) {
+        if (mmu_trace) printf("[cmmu] %08x: unhandled command %02x\n", base, cmd);
+        return;
+    }
+    u32 vaddr = mem_r32(base + CMMU_SAR);
+    u32 apr   = mem_r32(base + (cmd == 0x24 ? CMMU_SAPR : CMMU_UAPR));
+    u32 phys  = 0;
+    if (mmu_walk(apr, vaddr, &phys)) {
+        mem_w32(base + CMMU_SSR, 1);                  /* bit 0 = valid */
+        mem_w32(base + CMMU_SAR, phys);
+        probe_hits++;
+        if (mmu_trace) printf("[cmmu] probe %08x -> %08x (apr %08x)\n", vaddr, phys, apr);
+    } else {
+        mem_w32(base + CMMU_SSR, 0);
+        mem_w32(base + CMMU_PFAR, vaddr);
+        probe_misses++;
+        if (mmu_trace) printf("[cmmu] probe %08x MISS (apr %08x)\n", vaddr, apr);
+    }
+}
+
+static inline void dev_write32(u32 a, u32 v)
+{
+    mem_w32(a, v);
+    if (sysmode) {
+        u32 base;
+        if (cmmu_base_of(a, &base) && (a - base) == CMMU_SCR)
+            cmmu_command(base, v);
+    }
 }
 
 /* Execute one instruction.  Returns 1 on trap. */
@@ -667,6 +751,8 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
         putchar('\n');
     }
+    printf("cmmu probes: %llu hit, %llu miss\n",
+           (unsigned long long)probe_hits, (unsigned long long)probe_misses);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     printf("stopped at pc=%08x after %llu instructions (%.2fs, %.1f Minsn/s)\n",
            cpu.pc, (unsigned long long)cpu.count, secs,
@@ -696,6 +782,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--scale=", 8)) tick_scale = (u32)strtoul(argv[i] + 8, 0, 0);
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
+        else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
