@@ -285,6 +285,7 @@ static inline u32 dev_read32(u32 a)
 
 static int  mmu_trace;
 static u32  dump_addr;
+static u32  findpt_va;
 static u64  probe_hits, probe_misses;
 
 /*
@@ -305,6 +306,7 @@ static u64  probe_hits, probe_misses;
  * the APRs (0xE0790000 code, 0x803F0000 data), so its own setup is a no-op.
  */
 #define CODE_SEGTAB 0xE0790000u
+
 #define DATA_SEGTAB 0x803F0000u
 #define PTPOOL      0xC1100000u          /* free space above kernel bss */
 
@@ -402,11 +404,33 @@ static int cmmu_base_of(u32 a, u32 *base)
     return 0;
 }
 
+/*
+ * Interleaver stub.
+ *
+ * The kernel relocates its page tables into interleaved memory (physical mode
+ * 2, 0x8xxxxxxx) and points the APR there -- but on a single-node machine
+ * there is nothing to interleave across, and the emulator has no separate
+ * backing for that space, so the walk reads zeros.  A scan of all 5481 live
+ * pages confirms the kernel never actually populated a table there.
+ *
+ * With one node, interleaved memory is just local memory under a different
+ * name, so an empty mode-2 segment table falls back to the identity table the
+ * synthetic boot loader built.  This is a stand-in for a real interleaver
+ * model, not a substitute for one.
+ */
+static int ileave_stub;
+static u64 ileave_redirects;
+
 /* Two-level MC88200 walk: area pointer -> segment table -> page table. */
 static int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
 {
     u32 segtab = apr & 0xFFFFF000u;
     if (!segtab) return 0;
+    if (ileave_stub && (segtab & 0xC0000000u) == 0x80000000u &&
+        !mem_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4)) {
+        segtab = DATA_SEGTAB;
+        ileave_redirects++;
+    }
     u32 sdesc = mem_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4);
     if (!(sdesc & 1)) return 0;                       /* segment invalid */
     u32 pgtab = sdesc & 0xFFFFF000u;
@@ -934,6 +958,37 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
         putchar('\n');
     }
+    /*
+     * Locate the kernel's real page tables.  It built them while translation
+     * was effectively identity, so they are physically wherever it wrote
+     * them -- not at the address its APR now advertises.  Scan every
+     * allocated page as a candidate segment table: does its entry for
+     * findpt_va point at a page table whose entry for findpt_va is valid?
+     */
+    if (findpt_va) {
+        u32 sidx = (findpt_va >> 22) & 0x3FF, pidx = (findpt_va >> 12) & 0x3FF;
+        unsigned live = 0, hits = 0;
+        printf("searching for a segment table mapping %08x "
+               "(seg %u, page %u)\n", findpt_va, sidx, pidx);
+        for (u32 i = 0; i < NPAGES; i++) {
+            if (!pages[i]) continue;
+            live++;
+            u32 cand = i << 12;
+            u32 sdesc = mem_r32(cand + sidx * 4);
+            if (!(sdesc & 1)) continue;
+            u32 pgtab = sdesc & 0xFFFFF000u;
+            if (!pages[pgtab >> 12]) continue;
+            u32 pdesc = mem_r32(pgtab + pidx * 4);
+            if (!(pdesc & 1)) continue;
+            if (hits++ < 8)
+                printf("  segtab %08x -> pgtab %08x -> pte %08x (pa %08x)\n",
+                       cand, pgtab, pdesc,
+                       (pdesc & 0xFFFFF000u) | (findpt_va & 0xFFF));
+        }
+        printf("  %u candidate segment tables among %u live pages\n",
+               hits, live);
+    }
+
     if (dump_addr) {
         printf("memory at %08x:\n", dump_addr);
         for (int k = 0; k < 4; k++) {
@@ -981,7 +1036,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;
+        else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
+        else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
