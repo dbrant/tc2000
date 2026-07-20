@@ -286,6 +286,7 @@ static inline u32 dev_read32(u32 a)
 static int  mmu_trace;
 static u32  dump_addr;
 static u32  findpt_va;
+static u32  watch_pc;
 static u64  probe_hits, probe_misses;
 
 /*
@@ -312,6 +313,7 @@ static u64  probe_hits, probe_misses;
 
 static int synth_boot = 1;
 static u32 ptpool_next = PTPOOL;
+static u32 seed_mapper;
 
 static void map_range(u32 segtab, u32 lo, u32 hi)
 {
@@ -354,6 +356,7 @@ static void boot_build_tables(void)
         mem_w32(cmmu_present[i] + CMMU_SAPR, tab | 1);
         mem_w32(cmmu_present[i] + CMMU_UAPR, DATA_SEGTAB | 1);
     }
+    if (seed_mapper) mem_w32(0xC0014038u, seed_mapper);
     printf("synthetic boot: identity tables at %08x (code) / %08x (data), "
            "%u page tables\n",
            CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
@@ -534,6 +537,12 @@ static int step(void)
 
     if (sysmode && force_sig_pc && pc == force_sig_pc)
         cpu.r[2] = force_sig_val;
+
+    if (watch_pc && pc == watch_pc) {
+        printf("[watch] pc=%08x r2=%08x r3=%08x r7=%08x r9=%08x "
+               "r24=%08x r25=%08x r27=%08x\n",
+               pc, RD(2), RD(3), RD(7), RD(9), RD(24), RD(25), RD(27));
+    }
 
     u32 w   = mem_r32(translate(pc, 1));
     u32 op  = w >> 26;
@@ -1039,6 +1048,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
+        else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
+        else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
