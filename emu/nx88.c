@@ -202,6 +202,9 @@ static int  sysmode;
 static u32  tick_scale = 2000;
 static u32  force_sig_pc;      /* pc at which to force the TCS EEPROM sig */
 static u32  force_sig_val;
+static int  log_msgs;
+#define LOG_ROUTINE     0xC005A85Cu
+#define PRINTF_THROTTLE 0xC005A9D0u
 
 #define TIMER_ADDR 0xE07E8018u
 
@@ -221,9 +224,20 @@ static u32  force_sig_val;
  */
 #define CMMU_BASE 0xFFF00000u
 
+/*
+ * Which CMMUs this node actually has.  Advertising one at every slot is wrong:
+ * the boot path cross-checks the second code MMU against a per-node config
+ * byte at 0xC00156B5, and panics "invalid code_mmu2" if hardware and config
+ * disagree.  A minimal node is one code MMU plus one data MMU, which matches
+ * that byte reading zero.
+ */
+static u32 cmmu_present[8] = { 0xFFF7F000u, 0xFFF7E000u };
+static int n_cmmu = 2;
+
 static inline int is_cmmu_id(u32 a)
 {
-    return a >= CMMU_BASE && a <= 0xFFFFF000u && (a & 0xFFF) == 0;
+    for (int i = 0; i < n_cmmu; i++) if (cmmu_present[i] == a) return 1;
+    return 0;
 }
 
 static inline u32 cmmu_id_for(u32 a)
@@ -597,8 +611,51 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     cpu.pc = a.entry;
     WR(31, DATA_BASE + a.data + a.bss + 0x8000);
 
+    /* Kernel message capture.  subr_prf.o's formatter is reached two ways:
+       log(tag, fmt, ...) at LOG_ROUTINE, and printf_throttle(fmt, args)
+       called directly by the panic path.  Hooking both shows everything the
+       kernel tries to say, without needing a working console device. */
     clock_t t0 = clock();
+    u32 last_fmt = 0;
     while (cpu.count < limit) {
+        if (log_msgs) {
+            if (cpu.pc == LOG_ROUTINE) {
+                char tag[80], fmt[160];
+                mem_cstr(RD(2), tag, sizeof tag);
+                mem_cstr(RD(3), fmt, sizeof fmt);
+                if (RD(3) != last_fmt) {
+                    printf("[kern] %s: %s", tag, fmt);
+                    if (!strchr(fmt, '\n')) putchar('\n');
+                    last_fmt = RD(3);
+                }
+            } else if (cpu.pc == PRINTF_THROTTLE) {
+                char fmt[160];
+                mem_cstr(RD(2), fmt, sizeof fmt);
+                if (RD(2) != last_fmt && fmt[0]) {
+                    printf("[kern] %s", fmt);
+                    if (!strchr(fmt, '\n')) putchar('\n');
+                    /* resolve a %s argument: the caller hands over a small
+                       descriptor, so scan it for a pointer into kernel data
+                       that resolves to printable text */
+                    if (strstr(fmt, "%s")) {
+                        for (int k = 0; k < 6; k++) {
+                            u32 p = mem_r32(RD(3) + 4 * k);
+                            if (p < 0xC1000000u || p > 0xC1030000u) continue;
+                            char s[120];
+                            if (mem_cstr(p, s, sizeof s) < 3) continue;
+                            int ok = 1;
+                            for (char *q = s; *q; q++)
+                                if (*q < 32 || *q > 126) { ok = 0; break; }
+                            if (ok && strcmp(s, fmt)) {
+                                printf("[kern]   -> \"%s\"\n", s);
+                                break;
+                            }
+                        }
+                    }
+                    last_fmt = RD(2);
+                }
+            }
+        }
         if (step()) {
             printf("trap %d at pc=%08x after %llu instructions\n",
                    (int)trap_vector, trap_pc, (unsigned long long)cpu.count);
@@ -638,6 +695,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--sig=", 6)) sig = (u32)(u8)argv[i][6];
         else if (!strncmp(argv[i], "--scale=", 8)) tick_scale = (u32)strtoul(argv[i] + 8, 0, 0);
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
+        else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
