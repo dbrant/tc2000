@@ -57,11 +57,28 @@ static u8 **pages;
 static int realmm;
 static int dbg_trans;
 static u64 pcsample;
+static int scsi_trace, scsi_trace_n;  /* --scsitrace: log VME controller I/O */
+
+/* Per-node private-variable window.  _vvlocptr(var,node) maps a kernel-data
+   template var in [0xC0014000,0xC00156DC) to 0xF9000000 + node*0x2000 +
+   (var-0xC0014000): each node's private copy of that variable region.  The
+   kernel initialises the *template* directly (e.g. _intrlv_size clears the
+   50-entry exception table at 0xC0014118 to -1) and then reads it back through
+   this window, so on the master node the window aliases its own .data
+   template.  On a single node all nodes collapse onto that one copy. */
+#define VV_WINDOW  0xF9000000u
+#define VV_STRIDE  0x2000u
+#define VV_TEMPLATE 0xC0014000u          /* template base VA (in .text image) */
 
 static inline u32 cphys(u32 a)
 {
     if (realmm && a >= 0x80000000u && a < 0xC0000000u)
         return a & 0x7FFFFFFFu;
+    if (a >= VV_WINDOW && a < VV_WINDOW + 64u * VV_STRIDE) {
+        u32 off = (a - VV_WINDOW) % VV_STRIDE;
+        u32 tpl = realmm ? (VV_TEMPLATE - 0xC0000000u) : VV_TEMPLATE;
+        return tpl + off;
+    }
     return a;
 }
 
@@ -235,6 +252,13 @@ static void memop(u32 sub, u32 D, u32 ea)
        translates before touching memory. */
     if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
     ea = translate(ea, 0);
+    if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 400) {
+        int st = (sub >= 0x08 && sub <= 0x0B);
+        printf("[scsi] %-2s %08x sub=%x val=%08x pc=%08x @%llu\n",
+               st ? "WR" : "RD", ea, sub, st ? RD(D) : 0, dbg_pc,
+               (unsigned long long)cpu.count);
+        scsi_trace_n++;
+    }
     /* The free-running timer at 0xE07E8018 must respond to sub-word reads too:
        _startclock_duart polls it with ld.h and spins until it changes. */
     if (sysmode && (ea & ~3u) == TIMER_ADDR) {
@@ -1379,6 +1403,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;
         else if (!strcmp(argv[i], "--realmm")) { realmm = 1; translate_on = 1; ileave_stub = 1; }
         else if (!strcmp(argv[i], "--dbgtrans")) dbg_trans = 1;
+        else if (!strcmp(argv[i], "--scsitrace")) scsi_trace = 1;
         else if (!strncmp(argv[i], "--pcsample=", 11)) pcsample = strtoull(argv[i]+11,0,0);
         else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
