@@ -818,7 +818,12 @@ static inline u32 translate(u32 va, int code)
         return va - KOFF;
     }
 
-    u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
+    /* Below kernel space: user address.  Supervisor accesses use SAPR (the
+       kernel's map); user-mode accesses (PSR bit31 clear) use UAPR (the current
+       process's map).  The kernel boots entirely in supervisor mode, so this
+       only diverges once we drop a process to user mode. */
+    u32 aproff = (cpu.cr[1] & 0x80000000u) ? CMMU_SAPR : CMMU_UAPR;
+    u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + aproff);
     if (!(apr & 1)) return va;                 /* translation disabled */
 
     u32 vpn = va >> 12;
@@ -911,13 +916,17 @@ static void deliver_exception(u32 vector)
    its rte.  Vector to VBR + vector*8 like any exception. */
 static void deliver_trap(u32 vector, u32 tpc)
 {
-    cpu.cr[2] = cpu.cr[1];                  /* EPSR = PSR                     */
-    cpu.cr[4] = tpc | 2u;                   /* SXIP = trapping instr, VALID   */
-    cpu.cr[5] = (tpc + 4u) | 2u;            /* SNIP valid                     */
-    cpu.cr[6] = (tpc + 8u) | 2u;            /* SFIP valid                     */
-    cpu.cr[1] = cpu.cr[1] | 0x80000003u;    /* supervisor | IND | SFRZ        */
-    cpu.pc = cpu.cr[7] + vector * 8u;       /* VBR + vector*8                 */
-    cpu.has_pending = 0;                    /* abandon any pending delay slot */
+    cpu.cr[2] = cpu.cr[1];                  /* EPSR = PSR at trap time         */
+    /* Match the interrupt path (which is known to work through the shared
+       saveregs trampoline): SXIP INVALID so saveregs' rte falls through to its
+       SFIP continuation; the trap PC lives in SNIP (valid) as the resume base
+       the syscall dispatch adjusts (+4 err / +8 ok). */
+    cpu.cr[4] = tpc;                        /* SXIP = tpc, INVALID (V=0)       */
+    cpu.cr[5] = tpc | 2u;                   /* SNIP = tpc, valid               */
+    cpu.cr[6] = (tpc + 4u) | 2u;            /* SFIP valid                      */
+    cpu.cr[1] = cpu.cr[1] | 0x80000003u;    /* supervisor | IND | SFRZ         */
+    cpu.pc = cpu.cr[7] + vector * 8u;       /* VBR + vector*8                  */
+    cpu.has_pending = 0;                    /* abandon any pending delay slot  */
 }
 
 static int clock_irq;
@@ -1528,6 +1537,49 @@ static int run_user(const char *path, int argc, char **argv, u64 limit)
 
 /* ------------------------------------------------------------ system mode */
 
+/* ---- minimal userland bring-up (increment 2): drop a tiny program into user
+   mode under the booted kernel, so its syscall traps exercise the trap-delivery
+   path.  A private physical pool backs a synthetic user address space; UAPR
+   points at it, translate() uses UAPR whenever PSR bit31 is clear. */
+#define UPOOL_BASE 0xDD000000u
+static u32 upool_next = UPOOL_BASE;
+static int utest;
+static u32 upool_alloc(void) { u32 p = upool_next; upool_next += PAGE_SIZE;
+                               mem_zero(p, PAGE_SIZE); return p; }
+static void umap(u32 segtab, u32 va, u32 pa)
+{
+    u32 sidx = (va >> 22) & 0x3FF;
+    u32 sdesc = mem_r32(segtab + sidx * 4), pgtab;
+    if (sdesc & 1) pgtab = sdesc & 0xFFFFF000u;
+    else { pgtab = upool_alloc(); mem_w32(segtab + sidx * 4, pgtab | 1); }
+    mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, (pa & 0xFFFFF000u) | 1);
+}
+static void launch_utest(void)
+{
+    u32 segtab  = upool_alloc();
+    u32 codepa  = upool_alloc();
+    u32 stackpa = upool_alloc();
+    u32 uva = 0x1000u;
+    /* getpid (syscall 20), then spin at the error and success return points */
+    static const u32 prog[] = {
+        0x59200014u,   /* or  r9, r0, 20   ; getpid            */
+        0xf000d080u,   /* tb0 0, r0, 128   ; syscall trap      */
+        0xc0000000u,   /* br  .            ; error   (pc+4)    */
+        0xc0000000u,   /* br  .            ; success (pc+8)    */
+    };
+    for (unsigned i = 0; i < sizeof prog / 4; i++) mem_w32(codepa + i * 4, prog[i]);
+    umap(segtab, uva, codepa);
+    umap(segtab, 0xE000u, stackpa);
+    mem_w32(0xFFF7E000u + CMMU_UAPR, segtab | 1);   /* data UAPR */
+    mem_w32(0xFFF7F000u + CMMU_UAPR, segtab | 1);   /* code UAPR */
+    WR(31, 0xF000u);                                /* user stack pointer */
+    cpu.pc = uva;
+    cpu.cr[1] = 0u;                                 /* user mode, interrupts on */
+    printf("[utest] user program @VA %08x, segtab pa=%08x, UAPR set; dropping "
+           "to user mode\n", uva, segtab);
+}
+
+
 #define TEXT_BASE 0xC0010000u
 #define DATA_BASE 0xC1000000u
 
@@ -1590,8 +1642,10 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     while (cpu.count < limit) {
         pchist[pchpos++ & (PCH_N - 1)] = cpu.pc;
         /* derail catcher: kernel boot stays in kernel space (>=0xC0000000);
-           a fetch below it means a bad jump -- report the last kernel pc */
-        if (realmm && cpu.pc < 0xC0000000u) {
+           a fetch below it means a bad jump -- report the last kernel pc.
+           Exempt genuine user-mode execution (PSR bit31 clear), where a low PC
+           is expected. */
+        if (realmm && cpu.pc < 0xC0000000u && (cpu.cr[1] & 0x80000000u)) {
             printf("[derail] jumped to %08x from kernel pc=%08x @%llu\n",
                    cpu.pc, last_kpc, (unsigned long long)cpu.count);
             break;
@@ -1603,10 +1657,12 @@ static int run_sys(const char *path, u64 limit, u32 sig)
            (proc0 can't actually sleep -- it's still on the run queue -- so
            without this catcher it would crash into doadump; stop cleanly here
            and report the milestone instead.) */
-        if (!uland_probe && cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u) {
+        if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u
+            && !uland_probe) {
             printf("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
                    (unsigned long long)cpu.count);
+            if (utest) { launch_utest(); continue; }   /* drop to user mode */
             break;
         }
         /* halt catcher: _tcs_shutdown+0x38 and _doadump+0x20 are br-to-self
@@ -1806,6 +1862,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--uland")) uland_probe = 1;
         else if (!strcmp(argv[i], "--deliver-traps")) deliver_traps = 1;
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
+        else if (!strcmp(argv[i], "--utest")) { utest = 1; deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--xva=", 6)) xva = (u32)strtoul(argv[i]+6,0,0);
