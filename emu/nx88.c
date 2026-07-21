@@ -1577,6 +1577,22 @@ static void launch_utest(void)
        the register save (and thus the read-back syscall number) lands in
        garbage -> the syscall dispatches to kern_invalid.  Use proc0's own
        kernel stack (its current r31) as the trap stack. */
+    /* Integrate proc0's thread into the per-node curproclist the scheduler
+       maintains -- add_curproc (_fix_misaligned_flag c004f454) does: node at
+       [thread+0x78], chain [thread+0x14]=curproclist[node], curproclist[node]=
+       thread (head at [0xc101f430 + node*4]).  proc0 was made curproc manually
+       and never added, so remove_curproc (in the trap-return reschedule) can't
+       find it and panics.  Add its thread (curproc+0x200) at node 0. */
+    {
+        u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
+        u32 thr = cp + 0x200u;
+        u32 node = 0;
+        u32 head = 0xC101F430u + node * 4;
+        mem_w16(translate(thr + 0x78, 0), (u16)node);
+        mem_w32(translate(thr + 0x14, 0), mem_r32(translate(head, 0)));
+        mem_w32(translate(head, 0), thr);
+        printf("[utest] added thread %08x to curproclist[%u]\n", thr, node);
+    }
     cpu.cr[17] = RD(31);                            /* SR1 = kernel stack */
     WR(31, 0xF000u);                                /* user stack pointer */
     cpu.pc = uva;
