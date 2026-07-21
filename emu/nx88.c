@@ -1572,11 +1572,17 @@ static void launch_utest(void)
     umap(segtab, 0xE000u, stackpa);
     mem_w32(0xFFF7E000u + CMMU_UAPR, segtab | 1);   /* data UAPR */
     mem_w32(0xFFF7F000u + CMMU_UAPR, segtab | 1);   /* code UAPR */
+    /* A trap from user mode switches the kernel to the stack in SR1(cr17):
+       fpipe does `ld r31,cr17`.  We must point it at a valid kernel stack or
+       the register save (and thus the read-back syscall number) lands in
+       garbage -> the syscall dispatches to kern_invalid.  Use proc0's own
+       kernel stack (its current r31) as the trap stack. */
+    cpu.cr[17] = RD(31);                            /* SR1 = kernel stack */
     WR(31, 0xF000u);                                /* user stack pointer */
     cpu.pc = uva;
     cpu.cr[1] = 0u;                                 /* user mode, interrupts on */
-    printf("[utest] user program @VA %08x, segtab pa=%08x, UAPR set; dropping "
-           "to user mode\n", uva, segtab);
+    printf("[utest] user @VA %08x segtab=%08x kstack(cr17)=%08x; dropping to "
+           "user mode\n", uva, segtab, cpu.cr[17]);
 }
 
 
