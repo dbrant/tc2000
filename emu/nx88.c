@@ -469,6 +469,7 @@ static u32  dump_addr;
 static u32  findpt_va;
 static u32  watch_pc;
 static int  dump_pchist;
+static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static u64  probe_hits, probe_misses;
 
 /*
@@ -910,6 +911,7 @@ static u64 clock_period = 100000, next_clock;
    `sha_sync` enables it; addresses cover the sha.o driver text. */
 static int sha_sync = 1;
 static int biowait_sync = 1;
+static int skip_synchrtc = 1;         /* skip meaningless cross-node RTC sync */
 /* Root filesystem backing.  During install the root is the tape's UFS image
    (tapeimage.img, superblock at byte 0x2000); the blank disk.img is the write
    target.  Reads issued by the buffer cache are satisfied from this file. */
@@ -1038,6 +1040,21 @@ static int step(void)
            top spins on a lock we still hold. */
         if (RD(4) >= 0xC0000000u && RD(4) < 0xE0000000u)
             mem_w32(translate(RD(4), 0), 0);
+        cpu.pc = RD(1);
+        WR(2, 0);
+        return 0;
+    }
+
+    /* synchrtc() (c009ba14): cross-node RTC synchronization.  The kernel counts
+       64 nodes (the node-config device reads all slots present -- see the
+       node-presence note) and loops synchronizing each node's real-time clock,
+       waiting ~20M timer ticks for a per-node vv variable to reach -1.  The 63
+       phantom nodes never respond, so it times out and panics "synchrtc".  On a
+       single emulated node cross-node RTC sync is meaningless; skip the whole
+       routine (its local timer keeps running).  Making the machine truly
+       1-node instead (--nodes=1) avoids this but surfaces the idle-proc _sleep
+       assertion far earlier, so skipping is the lighter fix. */
+    if (skip_synchrtc && sysmode && pc == 0xC009BA14u) {
         cpu.pc = RD(1);
         WR(2, 0);
         return 0;
@@ -1485,6 +1502,21 @@ static int run_sys(const char *path, u64 limit, u32 sig)
 
     if (synth_boot) { boot_build_tables(); build_free_list(); }
 
+    /* Node-presence bitmap.  bfly_init scans slots 0..511 of the node-config
+       device at 0xFE00191C (one byte each); a byte in 0x00-0x7F reads "present"
+       (cmp/bb1-ge), 0x80-0xFF "absent", and it counts only present slots into
+       the node count at [0xC1014D40].  An unmapped device reads 0 -> all 512
+       look present -> the kernel believes it has 64 nodes and later times out
+       synchronizing 63 phantom RTCs (panic: synchrtc).  Mark only slots
+       [0, cfg_nodes) present so the machine is genuinely single-node.  Opt-in
+       via --nodes=N: making the machine truly 1-node makes the scheduler run
+       (and context-switch) far earlier, which then trips the idle-proc _sleep
+       assertion at ~3.7M -- so the default leaves the 64-node path intact and
+       skips synchrtc instead (see the synchrtc intercept). */
+    if (cfg_nodes)
+        for (u32 i = cfg_nodes; i < 512; i++)
+            mem_w8(0xFE00191Cu + i, 0xFF);
+
     memset(&cpu, 0, sizeof cpu);
     cpu.pc = a.entry;
     WR(31, DATA_BASE + a.data + a.bss + 0x8000);
@@ -1700,6 +1732,7 @@ int main(int argc, char **argv)
         }
         else if (!strncmp(argv[i], "--flstride=", 11)) fl_stride = (u32)strtoul(argv[i]+11,0,0);
         else if (!strncmp(argv[i], "--root=", 7)) root_img_path = argv[i]+7;
+        else if (!strncmp(argv[i], "--nodes=", 8)) cfg_nodes = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
