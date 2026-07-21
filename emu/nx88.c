@@ -59,6 +59,17 @@ static int dbg_trans;
 static u64 pcsample;
 static int scsi_trace, scsi_trace_n;  /* --scsitrace: log VME controller I/O */
 
+/* SCSI Host Adapter (sha.o) probe stub.  The controller's dual-port RAM +
+   register window sits at VME 0xFC008000; status reg at +0x800, command reg at
+   +0x802.  _init_iopb resets it by pulsing the command reg 0x1000->0 and then
+   polls status until it reads 2 (ready).  With no real controller the poll
+   spins forever.  This stub models just the reset handshake: the pulse drives
+   status busy(1)->ready(2), enough to get past _init_iopb and observe the next
+   step (IOPB build + doorbell).  Full IOPB/DMA/interrupt modelling is later. */
+#define SHA_STATUS 0xFC008800u
+#define SHA_CMD    0xFC008802u
+static u16 sha_status;
+
 /* Per-node private-variable window.  _vvlocptr(var,node) maps a kernel-data
    template var in [0xC0014000,0xC00156DC) to 0xF9000000 + node*0x2000 +
    (var-0xC0014000): each node's private copy of that variable region.  The
@@ -258,6 +269,17 @@ static void memop(u32 sub, u32 D, u32 ea)
                st ? "WR" : "RD", ea, sub, st ? RD(D) : 0, dbg_pc,
                (unsigned long long)cpu.count);
         scsi_trace_n++;
+    }
+    if (sysmode && ea == SHA_CMD && sub == 0x0A) {          /* SHA cmd reg write */
+        u16 v = (u16)RD(D);
+        if (v == 0x1000) sha_status = 1;                   /* reset: busy   */
+        else if (v == 0) sha_status = 2;                   /* pulse done: ready */
+        mem_w16(ea, v);
+        return;
+    }
+    if (sysmode && ea == SHA_STATUS && (sub == 0x02 || sub == 0x06)) { /* status read */
+        WR(D, sub == 0x06 ? (u32)(s32)(int16_t)sha_status : sha_status);
+        return;
     }
     /* The free-running timer at 0xE07E8018 must respond to sub-word reads too:
        _startclock_duart polls it with ld.h and spins until it changes. */
@@ -1383,8 +1405,8 @@ int main(int argc, char **argv)
     if (!pages) { fprintf(stderr, "out of memory\n"); return 1; }
 
     u64 limit = 200000000ull;
-    u32 sig = 0;
-    int mode_sys = 0, i = 1;
+    u32 sig = 'A';                     /* node EEPROM signature: 16MB + vmebus present */
+    int mode_sys = 0, identity_mode = 0, i = 1;
     const char *path = NULL;
 
     /* Options may appear anywhere, including after the binary name, so parse
@@ -1402,6 +1424,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;
         else if (!strcmp(argv[i], "--realmm")) { realmm = 1; translate_on = 1; ileave_stub = 1; }
+        else if (!strcmp(argv[i], "--identity")) identity_mode = 1;
         else if (!strcmp(argv[i], "--dbgtrans")) dbg_trans = 1;
         else if (!strcmp(argv[i], "--scsitrace")) scsi_trace = 1;
         else if (!strncmp(argv[i], "--pcsample=", 11)) pcsample = strtoull(argv[i]+11,0,0);
@@ -1426,8 +1449,17 @@ int main(int argc, char **argv)
     if (!path) {
         fprintf(stderr,
                 "usage: nx88 user <binary> [args...] [-v] [--limit=N]\n"
-                "       nx88 sys  <vmunix> [--sig=8] [--limit=N]\n");
+                "       nx88 sys  <vmunix> [--limit=N] [--identity]\n"
+                "  sys mode defaults to the real-memory model (--realmm) with\n"
+                "  EEPROM signature 'A'; pass --identity for the old identity path.\n");
         return 2;
+    }
+    /* realmm is the primary, sound path -- default it on in system mode.
+       --identity selects the superseded identity+fallback path instead. */
+    if (mode_sys) {
+        translate_on = 1;
+        ileave_stub  = 1;
+        realmm = !identity_mode;
     }
     if (mode_sys) return run_sys(path, limit, sig);
 
