@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <fcntl.h>
+#include <math.h>
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -72,6 +73,7 @@ static u32 irq_source;
    spins forever.  This stub models just the reset handshake: the pulse drives
    status busy(1)->ready(2), enough to get past _init_iopb and observe the next
    step (IOPB build + doorbell).  Full IOPB/DMA/interrupt modelling is later. */
+#define SHA_BASE   0xFC008800u
 #define SHA_STATUS 0xFC008800u
 #define SHA_CMD    0xFC008802u
 static u16 sha_status;
@@ -113,6 +115,7 @@ static u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range *
 static u64 dbg_count;                 /* current instruction count */
 
 static u32 dbg_pc;                    /* fwd: current pc, for trace prints */
+static u32 be32(const u8 *p);         /* fwd: big-endian word load */
 static inline u8 mem_r8(u32 a) { return page_of(a)[a & 4095]; }
 static inline void mem_w8(u32 a, u8 v)
 {
@@ -280,6 +283,8 @@ static void memop(u32 sub, u32 D, u32 ea)
         u16 v = (u16)RD(D);
         if (v == 0x1000) sha_status = 1;                   /* reset: busy   */
         else if (v == 0) sha_status = 2;                   /* pulse done: ready */
+        else if (v == 1)                                   /* command: complete it */
+            mem_w16(SHA_BASE + 0x73c, 1);   /* driver polls +0x73c for done */
         mem_w16(ea, v);
         return;
     }
@@ -463,6 +468,7 @@ static int  batc_trace;
 static u32  dump_addr;
 static u32  findpt_va;
 static u32  watch_pc;
+static int  dump_pchist;
 static u64  probe_hits, probe_misses;
 
 /*
@@ -896,11 +902,146 @@ static void deliver_exception(u32 vector)
 static int clock_irq;
 static u64 clock_period = 100000, next_clock;
 
+/* Pragmatic SCSI path.  The SHA driver rings the controller doorbell and then
+   blocks in tsleep waiting for a completion interrupt.  Our boot runs in the
+   non-sleepable idle-thread context (Mach MP bring-up never hands off to a
+   bootstrap thread), so that tsleep panics.  Instead we complete SHA commands
+   synchronously against disk.img and make the driver's wait return success.
+   `sha_sync` enables it; addresses cover the sha.o driver text. */
+static int sha_sync = 1;
+static int biowait_sync = 1;
+/* Root filesystem backing.  During install the root is the tape's UFS image
+   (tapeimage.img, superblock at byte 0x2000); the blank disk.img is the write
+   target.  Reads issued by the buffer cache are satisfied from this file. */
+static const char *root_img_path = "../tapeimage.img";
+static FILE *root_img;
+#define SHA_O_LO 0xC00BC000u
+#define SHA_O_HI 0xC00BE100u
+#define TSLEEP_ENTRY 0xC0054A64u
+/* Process a pending SHA command.  The driver blocked in tsleep waiting for the
+   completion interrupt handler (_shaintr) to fill in its command descriptor;
+   since we short-circuit the wait, we stand in for _shaintr and mark the
+   command complete.  The descriptor is in r27 for the SHA callers; [desc+4]
+   bit 2 is the error flag -- clear it so the driver takes its success path. */
+static void sha_complete(void)
+{
+    u32 desc = RD(27);
+    if (desc >= 0xC0000000u) {
+        u32 pa = translate(desc + 4, 0);
+        mem_w32(pa, mem_r32(pa) & ~4u);      /* clear error bit (bit 2) */
+    }
+    if (scsi_trace) {
+        printf("[sha] complete: caller=%08x desc=%08x r4(lock?)=%08x chan=%08x @%llu\n",
+               RD(1), desc, RD(4), RD(2),
+               (unsigned long long)cpu.count);
+        /* dump the IOPB descriptor and the SHA dual-port CDB region */
+        if (desc >= 0xC0000000u) {
+            printf("[iopb] desc %08x:", desc);
+            for (int i = 0; i < 0x40; i += 4)
+                printf(" %08x", mem_r32(translate(desc + i, 0)));
+            printf("\n");
+        }
+        printf("[dpram] fc008890:");
+        for (u32 aa = 0xFC008890u; aa < 0xFC0088C0u; aa += 2)
+            printf(" %04x", mem_r16(aa));
+        printf("\n");
+    }
+}
+
+/* MC88100 floating point (SFU1, opcode 0x21).  Precision codes: 0=single
+   (one register), 1=double (register pair rn:rn+1, high word in rn), 2=extended
+   (unused by nX -- treated as double).  Values are carried internally as C
+   double.  This code is reached first by the scheduler's load-average update
+   (_add_curproc), which is statistical and does not gate control flow, so exact
+   rounding is not critical -- correctness of not trapping is what matters. */
+static double fp_read(u32 reg, int prec)
+{
+    if (prec == 0) {
+        u32 b = RD(reg); float f; memcpy(&f, &b, 4); return (double)f;
+    }
+    u64 b = ((u64)RD(reg) << 32) | RD(reg + 1);
+    double d; memcpy(&d, &b, 8); return d;
+}
+static void fp_write(u32 reg, int prec, double v)
+{
+    if (prec == 0) {
+        float f = (float)v; u32 b; memcpy(&b, &f, 4); WR(reg, b); return;
+    }
+    u64 b; memcpy(&b, &v, 8);
+    WR(reg, (u32)(b >> 32)); WR(reg + 1, (u32)b);
+}
+
 /* Execute one instruction.  Returns 1 on trap. */
 static int step(void)
 {
     u32 pc = cpu.pc;
     dbg_pc = pc; dbg_count = cpu.count;
+
+    /* SHA I/O wait: complete synchronously and return from tsleep as if woken.
+       sleep_and_unlock releases the caller's lock (3rd arg, r4) on the normal
+       wakeup path; release it here too, but only when r4 is a kernel-space lock
+       (0xC0000000-0xE0000000) -- not every SHA wait passes a lock, and a device
+       register must never be written 0.  Simple unlock writes 0. */
+    if (sha_sync && sysmode && pc == TSLEEP_ENTRY
+        && RD(1) >= SHA_O_LO && RD(1) < SHA_O_HI) {
+        sha_complete();
+        if (RD(4) >= 0xC0000000u && RD(4) < 0xE0000000u)
+            mem_w32(translate(RD(4), 0), 0);   /* release the sleep lock */
+        cpu.pc = RD(1);            /* return to the SHA caller            */
+        WR(2, 0);                  /* tsleep result 0 = woken / success   */
+        return 0;
+    }
+
+    /* biowait completion.  The buffer-cache wait loop in _brelvp (c0074098)
+       spins `while (!(bp->b_flags & B_DONE)) sleep(bp)`; bit1 of bp->b_flags
+       (r2) is B_DONE (0x02).  The disk I/O was issued to the SHA and completed
+       synchronously by our intercept above, but nothing ran biodone() on the
+       buffer, so B_DONE never gets set and the wait sleeps -- panicking because
+       we run in idle-proc context.  Stand in for biodone: mark the buffer done
+       and return without sleeping so the wait loop exits.  Gated on the exact
+       caller PC (the sleep call inside the biowait loop). */
+    if (biowait_sync && sysmode && pc == TSLEEP_ENTRY && RD(1) == 0xC00740E8u) {
+        u32 buf = RD(2);
+        if (buf >= 0xC0000000u) {
+            /* struct buf fields (offsets recovered by dumping the live buffer):
+               +0x00 b_flags, +0x14 b_bcount, +0x38 b_pblk/DMA, +0x3c b_un.b_addr
+               (kernel VA), +0x40 b_blkno (512-byte units).  Satisfy a READ by
+               copying tapeimage.img[b_blkno*512 : +b_bcount] into b_un.b_addr;
+               this is what the SHA DMA + biodone would have left. */
+            u32 flags  = mem_r32(translate(buf + 0x00, 0));
+            u32 bcount = mem_r32(translate(buf + 0x14, 0));
+            u32 addr   = mem_r32(translate(buf + 0x3c, 0));
+            u32 blkno  = mem_r32(translate(buf + 0x40, 0));
+            int is_read = (flags & 1u);             /* B_READ = 0x01 */
+            if (root_img && is_read && addr >= 0xC0000000u
+                && bcount && bcount <= 0x10000u) {
+                u8 tmp[0x10000];
+                if (fseek(root_img, (long)blkno * 512, SEEK_SET) == 0) {
+                    size_t got = fread(tmp, 1, bcount, root_img);
+                    for (size_t k = got; k < bcount; k++) tmp[k] = 0;
+                    for (u32 k = 0; k < bcount; k += 4)
+                        mem_w32(translate(addr + k, 0), be32(tmp + k));
+                    if (scsi_trace)
+                        printf("[diskread] blk=%u (off=0x%lx) bcount=%u -> %08x got=%zu\n",
+                               blkno, (long)blkno * 512, bcount, addr, got);
+                }
+            }
+            u32 pa = translate(buf, 0);
+            mem_w32(pa, mem_r32(pa) | 2u);         /* set B_DONE (bit 1) */
+            if (scsi_trace)
+                printf("[biodone] buf=%08x flags=%08x->%08x blk=%u bcount=%u addr=%08x @%llu\n",
+                       buf, flags, mem_r32(pa), blkno, bcount, addr,
+                       (unsigned long long)cpu.count);
+        }
+        /* The real sleep_and_unlock releases the lock passed in r4 (buf+0x1c)
+           as it sleeps; we must too, or the biowait loop's simple_lock at the
+           top spins on a lock we still hold. */
+        if (RD(4) >= 0xC0000000u && RD(4) < 0xE0000000u)
+            mem_w32(translate(RD(4), 0), 0);
+        cpu.pc = RD(1);
+        WR(2, 0);
+        return 0;
+    }
 
     /* Deliver a periodic hardclock interrupt once the kernel has enabled
        interrupts (PSR IND clear) and we are at an instruction boundary. */
@@ -915,6 +1056,7 @@ static int step(void)
     if (sysmode && force_sig_pc && pc == force_sig_pc)
         cpu.r[2] = force_sig_val;
 
+
     /* realmm: snoop the pmap mapper for device mappings (VA=r3 -> PA=r4) */
     if (realmm && pc == PMAP_MAP_FN && RD(4) >= 0xE0000000u)
         devmap_add(RD(3), RD(4));
@@ -923,6 +1065,17 @@ static int step(void)
        track where it actually resolves so the handshake meets the kernel */
     if (realmm && pc == 0xC00A0E80u)
         tcs_mbox_pa = translate(RD(7), 0);
+
+    /* Root mount: ufs_mountroot(&rootdev, "") is dispatched here (c0071dbc).
+       rootdev is the SCSI disk; the mount reads its UFS superblock, which is
+       all zeros on a blank disk.img, so the magic check fails -> "cannot mount
+       root".  Booting needs a real UFS root (miniroot) on rootdev. */
+    if (scsi_trace && sysmode && pc == 0xC0071DBCu) {
+        printf("[mountroot] rootdev=%08x bootdev=%08x mountop@%08x @%llu\n",
+               mem_r32(translate(0xC1015A48u, 0)),
+               mem_r32(translate(0xC009EB40u, 0)),
+               RD(9), (unsigned long long)cpu.count);
+    }
 
     if (watch_pc && pc == watch_pc) {
         printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x @%llu\n",
@@ -975,7 +1128,36 @@ static int step(void)
         default: goto badinsn;
         }
     } else if (op == 0x21) {                                          /* FPU */
-        goto badinsn;                     /* not implemented; none seen yet */
+        u32 fop = (w >> 11) & 0x1F;
+        int td = (w >> 9) & 3, t1 = (w >> 7) & 3, t2 = (w >> 5) & 3;
+        u32 S2 = w & 31;
+        switch (fop) {
+        case 0x05: fp_write(D, td, fp_read(S1,t1) + fp_read(S2,t2)); break; /* fadd */
+        case 0x06: fp_write(D, td, fp_read(S1,t1) - fp_read(S2,t2)); break; /* fsub */
+        case 0x00: fp_write(D, td, fp_read(S1,t1) * fp_read(S2,t2)); break; /* fmul */
+        case 0x0E: fp_write(D, td, fp_read(S1,t1) / fp_read(S2,t2)); break; /* fdiv */
+        case 0x0F: fp_write(D, td, sqrt(fp_read(S2,t2))); break;            /* fsqrt */
+        case 0x04: fp_write(D, td, (double)(s32)RD(S2)); break;   /* flt int->fp */
+        case 0x09:                                               /* int  (round) */
+            WR(D, (u32)(s32)llrint(fp_read(S2,t2))); break;
+        case 0x0A:                                               /* nint (round) */
+            WR(D, (u32)(s32)llrint(fp_read(S2,t2))); break;
+        case 0x0B:                                               /* trnc (toward 0) */
+            WR(D, (u32)(s32)trunc(fp_read(S2,t2))); break;
+        case 0x07: {                                             /* fcmp */
+            double x = fp_read(S1,t1), y = fp_read(S2,t2);
+            u32 r = 0;
+            if (!(x < y || x > y || x == y)) r |= 0x1;   /* un: unordered */
+            if (x == y) r |= 0x2;                        /* eq */
+            if (x != y) r |= 0x4;                        /* ne */
+            if (x > y)  r |= 0x8;                        /* gt */
+            if (x <= y) r |= 0x10;                       /* le */
+            if (x < y)  r |= 0x20;                       /* lt */
+            if (x >= y) r |= 0x40;                        /* ge */
+            WR(D, r); break;
+        }
+        default: goto badinsn;
+        }
     } else if (op >= 0x30 && op <= 0x33) {          /* br / bsr, 26-bit disp */
         s32 off = (s32)(w << 6) >> 6;               /* sign-extend 26 bits   */
         branch = pc + (off << 2);
@@ -1318,7 +1500,12 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     clock_t t0 = clock();
     u32 last_fmt = 0;
     u32 last_kpc = cpu.pc;
+    /* PC ring buffer: the last PCH_N program counters, for post-mortem tracing
+       of the crash/halt sequence.  Cheap enough to keep always on. */
+    #define PCH_N 65536
+    static u32 pchist[PCH_N]; static unsigned pchpos = 0;
     while (cpu.count < limit) {
+        pchist[pchpos++ & (PCH_N - 1)] = cpu.pc;
         /* derail catcher: kernel boot stays in kernel space (>=0xC0000000);
            a fetch below it means a bad jump -- report the last kernel pc */
         if (realmm && cpu.pc < 0xC0000000u) {
@@ -1332,6 +1519,13 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             printf("[halt] reached %s spin at %08x @%llu\n",
                    cpu.pc == 0xC00A24F4u ? "tcs_shutdown" : "doadump",
                    cpu.pc, (unsigned long long)cpu.count);
+            if (dump_pchist) {
+                printf("--- last %d PCs before halt ---\n", PCH_N);
+                for (unsigned k = 0; k < PCH_N; k++)
+                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                           (k % 8 == 7) ? "\n" : " ");
+                printf("\n");
+            }
             break;
         }
         last_kpc = cpu.pc;
@@ -1495,6 +1689,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
+        else if (!strcmp(argv[i], "--pchist")) dump_pchist = 1;
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--xva=", 6)) xva = (u32)strtoul(argv[i]+6,0,0);
@@ -1504,6 +1699,7 @@ int main(int argc, char **argv)
             char *c = strchr(argv[i]+9, ':'); wmem_hi = c ? (u32)strtoul(c+1,0,0) : wmem_lo+0x1000;
         }
         else if (!strncmp(argv[i], "--flstride=", 11)) fl_stride = (u32)strtoul(argv[i]+11,0,0);
+        else if (!strncmp(argv[i], "--root=", 7)) root_img_path = argv[i]+7;
         else if (!strcmp(argv[i], "sys")) mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
@@ -1523,6 +1719,28 @@ int main(int argc, char **argv)
         translate_on = 1;
         ileave_stub  = 1;
         realmm = !identity_mode;
+        /* Open the root filesystem image (the tape's UFS) for disk reads.
+           If --root wasn't given, derive it from the vmunix path: vmunix lives
+           at <tapedir>/vmunix and the tape image is its sibling <tapedir>.img
+           (e.g. .../tapeimage/vmunix -> .../tapeimage.img). */
+        static char derived[1024];
+        if (!strcmp(root_img_path, "../tapeimage.img")) {
+            size_t n = strlen(path);
+            const char *base = path + n;
+            while (base > path && base[-1] != '/' && base[-1] != '\\') base--;
+            size_t dlen = (size_t)(base - path);   /* includes trailing slash */
+            if (dlen > 1 && dlen < sizeof derived - 8) {
+                memcpy(derived, path, dlen - 1);   /* drop the trailing slash */
+                strcpy(derived + dlen - 1, ".img");
+                root_img_path = derived;
+            }
+        }
+        root_img = fopen(root_img_path, "rb");
+        if (root_img)
+            printf("root image: %s (open)\n", root_img_path);
+        else
+            fprintf(stderr, "root image: %s could not be opened (disk reads "
+                    "will return zeros) -- pass --root=PATH\n", root_img_path);
     }
     if (mode_sys) return run_sys(path, limit, sig);
 
