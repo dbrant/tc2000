@@ -207,6 +207,11 @@ static inline u32 dev_read32(u32 a);    /* device-aware load  (timer, CMMU IDs) 
 static inline void dev_write32(u32 a, u32 v); /* device-aware store (CMMU commands) */
 static inline void tcs_poke(u32 a);           /* TCS mailbox handshake */
 
+/* forward decls so memop can service the free-running timer at all widths */
+static int  sysmode;
+static u32  tick_scale = 2000;
+#define TIMER_ADDR 0xE07E8018u
+
 /* memory-op helper shared by the immediate and triadic forms */
 static inline u32 translate(u32 va, int code);
 
@@ -217,6 +222,21 @@ static void memop(u32 sub, u32 D, u32 ea)
        translates before touching memory. */
     if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
     ea = translate(ea, 0);
+    /* The free-running timer at 0xE07E8018 must respond to sub-word reads too:
+       _startclock_duart polls it with ld.h and spins until it changes. */
+    if (sysmode && (ea & ~3u) == TIMER_ADDR) {
+        u32 t = (u32)(cpu.count * tick_scale);   /* 32-bit big-endian counter */
+        u32 off = ea & 3;
+        switch (sub) {
+        case 0x05: WR(D, t); return;
+        case 0x02: WR(D, (t >> (off < 2 ? 16 : 0)) & 0xFFFF); return;   /* ld.hu */
+        case 0x06: { u16 h = (t >> (off < 2 ? 16 : 0)) & 0xFFFF;
+                     WR(D, (s32)(int16_t)h); return; }                  /* ld.h  */
+        case 0x03: WR(D, (t >> (24 - off * 8)) & 0xFF); return;         /* ld.bu */
+        case 0x07: { u8 b = (t >> (24 - off * 8)) & 0xFF;
+                     WR(D, (s32)(int8_t)b); return; }                   /* ld.b  */
+        }
+    }
     switch (sub) {
     case 0x05: WR(D, dev_read32(ea)); break;                     /* ld    */
     case 0x07: { u8 v = mem_r8(ea);  WR(D, (s32)(int8_t)v); } break;   /* ld.b  */
@@ -237,16 +257,13 @@ static const u8 memop_scale[16] = {
     1,4, 2,1, 8,4,2,1, 8,4,2,1, 8,4,2,1
 };
 
-/* system-mode device hooks (set by the sysmode driver) */
-static int  sysmode;
-static u32  tick_scale = 2000;
+/* system-mode device hooks (set by the sysmode driver; sysmode/tick_scale and
+   TIMER_ADDR are forward-declared above so memop can see them) */
 static u32  force_sig_pc;      /* pc at which to force the TCS EEPROM sig */
 static u32  force_sig_val;
 static int  log_msgs;
 #define LOG_ROUTINE     0xC005A85Cu
 #define PRINTF_THROTTLE 0xC005A9D0u
-
-#define TIMER_ADDR 0xE07E8018u
 
 /*
  * MC88200 CMMU ID registers.
@@ -584,6 +601,15 @@ static void cmmu_command(u32 base, u32 cmd)
     int is_code = (base == 0xFFF7F000u);
     u32 phys  = 0;
     if (walk_fb(apr, vaddr, is_code, &phys)) {
+        /* Single-node machine: all RAM is on the master node (node 0).  The
+           kernel derives a page's node from vtop bits 28-23 (_m_expand), and
+           on the identity path our reported PA carries phantom non-zero node
+           bits (kernel data at 0xC1xxxxxx decodes to node 2), which fails the
+           kernel's "pool must be on master node" checks.  Force the node field
+           to 0 for kernel RAM so vtop tells the truth for a 1-node system.
+           (realmm gets correct nodes structurally, so only patch identity.) */
+        if (!realmm && phys >= 0xC0000000u && phys < 0xE0000000u)
+            phys &= ~0x1F800000u;
         mem_w32(base + CMMU_SSR, 1);                  /* bit 0 = valid */
         mem_w32(base + CMMU_SAR, phys);
         probe_hits++;
