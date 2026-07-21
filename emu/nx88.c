@@ -581,7 +581,12 @@ static int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
 static int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
 {
     if (mmu_walk(apr, vaddr, phys)) return 1;
-    if (realmm) {
+    /* Fall back to the synthetic table on ANY miss (segment- or page-level) in
+       the kernel's own table.  The kernel's table is only partially populated
+       in our model, so a present segment descriptor with a missing page entry
+       would otherwise fail even though the address is really mapped.  Applies
+       to both realmm (direct map) and the identity path (--ileave). */
+    if (realmm || ileave_stub) {
         u32 syn = code ? CODE_SEGTAB : DATA_SEGTAB;
         if (mmu_walk(syn | 1, vaddr, phys)) return 1;
         if (vaddr >= 0xE0000000u) { *phys = vaddr; return 1; }
@@ -713,9 +718,9 @@ static int step(void)
         cpu.r[2] = force_sig_val;
 
     if (watch_pc && pc == watch_pc) {
-        printf("[watch] pc=%08x r2=%08x r3=%08x r7=%08x r9=%08x "
-               "r24=%08x r25=%08x r27=%08x\n",
-               pc, RD(2), RD(3), RD(7), RD(9), RD(24), RD(25), RD(27));
+        printf("[watch] pc=%08x r1=%08x r2=%08x r4=%08x r27=%08x @%llu\n",
+               pc, RD(1), RD(2), RD(4), RD(27), (unsigned long long)cpu.count);
+        if (0) printf("%08x%08x%08x", RD(3), RD(7), RD(9));
     }
 
     u32 w   = mem_r32(translate(pc, 1));
@@ -824,7 +829,12 @@ static int step(void)
             branch = b & ~3u;
             taken = 1;
         } else if (sub == 0x3F) {                             /* rte          */
-            trap_taken = 1; trap_vector = (u32)-2; trap_pc = pc; return 1;
+            /* Return from exception: resume at SNIP (cr5), the saved next
+               instruction pointer, with its V/E control bits masked off.  The
+               kernel uses this to launch processes and return from faults. */
+            cpu.cr[1] = cpu.cr[2];       /* restore PSR from EPSR */
+            branch = cpu.cr[5] & ~3u;
+            taken = 1;
         } else {
             goto badinsn;
         }
