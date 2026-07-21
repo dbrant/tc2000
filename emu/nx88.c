@@ -1060,6 +1060,7 @@ static int step(void)
         return 0;
     }
 
+
     /* Deliver a periodic hardclock interrupt once the kernel has enabled
        interrupts (PSR IND clear) and we are at an instruction boundary. */
     if (clock_irq && sysmode && !cpu.has_pending && !(cpu.cr[1] & 2u)
@@ -1543,6 +1544,19 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         if (realmm && cpu.pc < 0xC0000000u) {
             printf("[derail] jumped to %08x from kernel pc=%08x @%llu\n",
                    cpu.pc, last_kpc, (unsigned long long)cpu.count);
+            break;
+        }
+        /* BOOT COMPLETE: the swapper's sched() idle loop is `for(;;)
+           sleep(&proc0)` -- _sleep entry c0054720 called from c004859c with
+           chan &proc0 (=c0047f88).  Reaching it means main() finished: root is
+           mounted, kernel/daemon threads are created, and proc0 goes idle.
+           (proc0 can't actually sleep -- it's still on the run queue -- so
+           without this catcher it would crash into doadump; stop cleanly here
+           and report the milestone instead.) */
+        if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u) {
+            printf("[boot-complete] kernel reached the swapper sched() idle "
+                   "loop @%llu -- main() done, root mounted.\n",
+                   (unsigned long long)cpu.count);
             break;
         }
         /* halt catcher: _tcs_shutdown+0x38 and _doadump+0x20 are br-to-self
