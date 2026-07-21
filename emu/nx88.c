@@ -470,6 +470,9 @@ static u32  findpt_va;
 static u32  watch_pc;
 static int  dump_pchist;
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
+static int  uland_probe;              /* dump run queue at the swapper sleep */
+static int  deliver_traps;            /* deliver user traps to kernel handlers */
+static int  trace_traps;              /* log each delivered trap */
 static u64  probe_hits, probe_misses;
 
 /*
@@ -900,6 +903,23 @@ static void deliver_exception(u32 vector)
     cpu.pc = cpu.cr[7] + vector * 8u;       /* VBR + vector*8                 */
 }
 
+/* Deliver a synchronous TRAP (a tb0/tb1/tcnd trap instruction, a page fault,
+   etc.) to the kernel.  Unlike an interrupt, a trap is caused BY an instruction,
+   so the execute stage is occupied: SXIP points at the trapping instruction and
+   is VALID.  The kernel's saveregs reads cr4/cr5/cr6; the syscall path advances
+   the return PC past the trap (nX: SXIP+4 on error, SXIP+8 on success) before
+   its rte.  Vector to VBR + vector*8 like any exception. */
+static void deliver_trap(u32 vector, u32 tpc)
+{
+    cpu.cr[2] = cpu.cr[1];                  /* EPSR = PSR                     */
+    cpu.cr[4] = tpc | 2u;                   /* SXIP = trapping instr, VALID   */
+    cpu.cr[5] = (tpc + 4u) | 2u;            /* SNIP valid                     */
+    cpu.cr[6] = (tpc + 8u) | 2u;            /* SFIP valid                     */
+    cpu.cr[1] = cpu.cr[1] | 0x80000003u;    /* supervisor | IND | SFRZ        */
+    cpu.pc = cpu.cr[7] + vector * 8u;       /* VBR + vector*8                 */
+    cpu.has_pending = 0;                    /* abandon any pending delay slot */
+}
+
 static int clock_irq;
 static u64 clock_period = 100000, next_clock;
 
@@ -1060,6 +1080,36 @@ static int step(void)
         return 0;
     }
 
+
+    /* one-shot: dump the run queue + curproc context at the swapper sleep */
+    if (uland_probe && sysmode && pc == 0xC0054720u && RD(1) == 0xC004859Cu) {
+        static int once = 0;
+        if (!once) { once = 1;
+            u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
+            u32 ctx = mem_r32(translate(cp + 0xc8, 0));
+            printf("[uland] curproc=%08x link+4=%08x state+40=%08x ctx+c8=%08x\n",
+                   cp, mem_r32(translate(cp+0x04,0)), mem_r32(translate(cp+0x40,0)), ctx);
+            if (ctx >= 0xC0000000u)
+                printf("        ctx: pc+80=%08x sp+7c=%08x pgdir+a0=%08x\n",
+                       mem_r32(translate(ctx+0x80,0)), mem_r32(translate(ctx+0x7c,0)),
+                       mem_r32(translate(ctx+0xa0,0)));
+            /* dump the run-queue head region (c0014498) and follow the chain */
+            printf("        runq head c0014498: ");
+            for (int i=0;i<8;i++) printf("%08x ", mem_r32(translate(0xC0014498u+i*4,0)));
+            printf("\n");
+            u32 link = mem_r32(translate(0xC0014498u, 0));   /* first entry */
+            for (int n=0; n<12 && link>=0xC0000000u && link!=0xC0014498u; n++) {
+                printf("        rq[%d] proc=%08x  fwd+0=%08x  ctx+c8=%08x pc=%08x\n",
+                       n, link, mem_r32(translate(link+0,0)),
+                       mem_r32(translate(link+0xc8,0)),
+                       mem_r32(translate(link+0xc8,0))>=0xC0000000u
+                         ? mem_r32(translate(mem_r32(translate(link+0xc8,0))+0x80,0)) : 0);
+                u32 nx = mem_r32(translate(link+0, 0));
+                if (nx==link) break;
+                link = nx;
+            }
+        }
+    }
 
     /* Deliver a periodic hardclock interrupt once the kernel has enabled
        interrupts (PSR IND clear) and we are at an instruction boundary. */
@@ -1553,7 +1603,7 @@ static int run_sys(const char *path, u64 limit, u32 sig)
            (proc0 can't actually sleep -- it's still on the run queue -- so
            without this catcher it would crash into doadump; stop cleanly here
            and report the milestone instead.) */
-        if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u) {
+        if (!uland_probe && cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u) {
             printf("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
                    (unsigned long long)cpu.count);
@@ -1634,6 +1684,23 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             }
         }
         if (step()) {
+            /* Faithful userland: deliver real synchronous traps (syscalls via
+               vector 128, page faults via vector 2, etc.) to the kernel's own
+               handlers instead of stopping, so user code runs under nX.  A
+               vector of -1 is an unimplemented instruction (an emulator gap,
+               not a real trap) -- keep stopping on that so bugs stay visible.
+               The boot takes zero traps, so this never fires before userland;
+               gated on --deliver-traps to keep the default boot untouched. */
+            if (deliver_traps && trap_vector != (u32)-1
+                && cpu.cr[7] >= 0xC0000000u) {
+                if (trace_traps)
+                    printf("[trap] vector %u (0x%x) at pc=%08x psr=%08x @%llu\n",
+                           trap_vector, trap_vector, trap_pc, cpu.cr[1],
+                           (unsigned long long)cpu.count);
+                deliver_trap(trap_vector, trap_pc);
+                trap_taken = 0;
+                continue;
+            }
             printf("trap %d at pc=%08x after %llu instructions\n",
                    (int)trap_vector, trap_pc, (unsigned long long)cpu.count);
             break;
@@ -1736,6 +1803,9 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "--pchist")) dump_pchist = 1;
+        else if (!strcmp(argv[i], "--uland")) uland_probe = 1;
+        else if (!strcmp(argv[i], "--deliver-traps")) deliver_traps = 1;
+        else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--xva=", 6)) xva = (u32)strtoul(argv[i]+6,0,0);
