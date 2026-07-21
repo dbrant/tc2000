@@ -56,6 +56,7 @@ static u8 **pages;
  */
 static int realmm;
 static int dbg_trans;
+static u64 pcsample;
 
 static inline u32 cphys(u32 a)
 {
@@ -75,9 +76,9 @@ static inline u8 *page_of(u32 a)
 static u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
 static u32 wval;                      /* --wval=V: trace writes whose value&~0xfff==V */
 static u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range */
-static u32 dbg_pc;                    /* current pc, for trace prints */
 static u64 dbg_count;                 /* current instruction count */
 
+static u32 dbg_pc;                    /* fwd: current pc, for trace prints */
 static inline u8 mem_r8(u32 a) { return page_of(a)[a & 4095]; }
 static inline void mem_w8(u32 a, u8 v)
 {
@@ -338,21 +339,43 @@ static inline u32 cmmu_id_for(u32 a)
 #define CMRAM_DATA   0xE07EB000u
 
 /*
- * The select value is a full 32-bit interleaved address (e.g. 0x40000000 for
- * the master-mapper free list, 0x82004001 for descriptor slots), so the window
- * is keyed by the whole select and proxied to backing memory.  Reading or
- * writing the data port therefore hits the same storage a direct access to
- * that interleaved address would -- window and direct views stay coherent.
+ * The select value keys a CMRAM slot.  The interleaver's config/pool RAM is
+ * *separate* storage from main memory -- it must not alias it.  An earlier
+ * model proxied the data port straight onto the main backing store, which was
+ * fine for the sparse high selects the free list uses (0x40000000) but fatal
+ * once _cmram_interleave_setup walked the low slots (0, 0x8000, 0x10000, ...):
+ * writing 0 to slot 0x90000 landed on kernel text at physical 0x90000 and
+ * silently zeroed vm_queue_remove, so it ran through no-op text, never loaded
+ * r25, and eventually called vm_mapping_init(garbage) -> "vnode_mapping_decr".
+ * CMRAM therefore gets its own sparse, on-demand backing keyed by the select.
  */
 static u32 cmram_sel;
 static u64 cmram_reads, cmram_writes;
+
+static u8 **cmram_pages;                  /* dedicated CMRAM backing store */
+static inline u8 *cmram_page_of(u32 sel)
+{
+    u32 i = (sel >> 12) & (NPAGES - 1);
+    if (!cmram_pages[i]) cmram_pages[i] = calloc(1, PAGE_SIZE);
+    return cmram_pages[i];
+}
+static inline u32 cmram_r32(u32 sel)
+{
+    u8 *p = cmram_page_of(sel) + (sel & (PAGE_SIZE - 4));
+    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+static inline void cmram_w32(u32 sel, u32 v)
+{
+    u8 *p = cmram_page_of(sel) + (sel & (PAGE_SIZE - 4));
+    p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
+}
 
 static inline u32 dev_read32(u32 a)
 {
     if (sysmode) {
         if (a == TIMER_ADDR) return (u32)(cpu.count * tick_scale);
         if (is_cmmu_id(a))   return cmmu_id_for(a);
-        if (a == CMRAM_DATA) { cmram_reads++; return mem_r32(cmram_sel & ~3u); }
+        if (a == CMRAM_DATA) { cmram_reads++; return cmram_r32(cmram_sel & ~3u); }
         if (a == 0xE07EA008u || a == 0xE07EA010u || a == 0xE07EA028u)
             return 0;                    /* status ports: ready, no error */
     }
@@ -466,7 +489,9 @@ static void build_free_list(void)
     u32 n = 0x60;                        /* limit at 0xC100DC58 */
     for (u32 i = 0; i < n; i++) {
         u32 slot = head + i * fl_stride;
-        mem_w32(slot, (i + 1 < n) ? head + (i + 1) * fl_stride : 0);
+        /* the free list lives in the interleaver pool, reached through the
+           CMRAM data port -- populate the dedicated CMRAM store, not main RAM */
+        cmram_w32(slot, (i + 1 < n) ? head + (i + 1) * fl_stride : 0);
     }
     printf("synthetic free list: head %08x, %u entries, stride %#x\n",
            head, n, fl_stride);
@@ -524,21 +549,28 @@ static void boot_build_tables(void)
  * to let boot proceed; real variable payloads can be filled in as the kernel
  * turns out to need them.
  */
+/* TCS mailbox physical address.  Identity boot accesses it at the fixed device
+   address 0xFE001800; realmm maps it into a kernel VA that resolves elsewhere,
+   so the address is tracked dynamically (set from the pointer the kernel
+   stores at _pmap_kernel+0xd74).  Whatever it is, the kernel's writer and
+   poller both use the same VA, so completing the handshake at the resolved PA
+   makes both sides agree. */
 #define TCS_MBOX 0xFE001800u
+static u32 tcs_mbox_pa = TCS_MBOX;
 
 static u64 tcs_commands;
 static int tcs_trace;
 
 static inline void tcs_poke(u32 a)
 {
-    if (a != TCS_MBOX) return;
-    u8 cmd = mem_r8(TCS_MBOX);
+    if (a != tcs_mbox_pa) return;
+    u8 cmd = mem_r8(tcs_mbox_pa);
     if (!cmd) return;
     if (tcs_trace)
         printf("[tcs] command %02x (args %08x %08x) -> ok\n", cmd,
-               mem_r32(TCS_MBOX + 0x10), mem_r32(TCS_MBOX + 0x14));
-    mem_w8(TCS_MBOX, 0);            /* consumed */
-    mem_w8(TCS_MBOX + 5, 1);        /* response ready, no error */
+               mem_r32(tcs_mbox_pa + 0x10), mem_r32(tcs_mbox_pa + 0x14));
+    mem_w8(tcs_mbox_pa, 0);         /* consumed */
+    mem_w8(tcs_mbox_pa + 5, 1);     /* response ready, no error */
     tcs_commands++;
 }
 
@@ -588,11 +620,52 @@ static int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
     return 1;
 }
 
+/*
+ * Device-mapping intercept (realmm option b).
+ *
+ * The kernel maps device pages (physical >= 0xE0000000: DUART, interleaver,
+ * TCS, CMMU windows) into kernel VA space via the low-level pmap mapper at
+ * 0xC00A6B44 (r3 = VA, r4 = PA).  Those PTEs don't reliably land in the
+ * kernel's own page table in our model, and the synthetic direct map would
+ * resolve the VA to the wrong (offset) physical address -- which is why the
+ * TCS mailbox VA pointed at plain RAM instead of the device.  So we snoop that
+ * mapper and remember VA->devicePA here; walk_fb consults it before the
+ * synthetic fallback.  Device PAs (>=0xE0000000) are unmistakable: the offset
+ * map only ever yields < 0x20000000 for kernel space.
+ */
+#define PMAP_MAP_FN 0xC00A6B44u
+static struct { u32 va, pa; } devmap[512];
+static int ndevmap;
+
+static void devmap_add(u32 va, u32 pa)
+{
+    va &= ~0xFFFu; pa &= ~0xFFFu;
+    for (int i = 0; i < ndevmap; i++)
+        if (devmap[i].va == va) { devmap[i].pa = pa; return; }
+    if (ndevmap < (int)(sizeof devmap / sizeof devmap[0])) {
+        devmap[ndevmap].va = va;
+        devmap[ndevmap].pa = pa;
+        ndevmap++;
+    }
+}
+
+static u32 devmap_lookup(u32 va)
+{
+    va &= ~0xFFFu;
+    for (int i = 0; i < ndevmap; i++)
+        if (devmap[i].va == va) return devmap[i].pa;
+    return 0;
+}
+
 /* Walk the kernel's active table, then (realmm) fall back to the synthetic
    direct-map table so the kernel's own vtop and the CPU's translate() agree. */
 static int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
 {
     if (mmu_walk(apr, vaddr, phys)) return 1;
+    if (realmm && ndevmap) {
+        u32 dp = devmap_lookup(vaddr);
+        if (dp) { *phys = dp | (vaddr & 0xFFF); return 1; }
+    }
     /* Fall back to the synthetic table on ANY miss (segment- or page-level) in
        the kernel's own table.  The kernel's table is only partially populated
        in our model, so a present segment descriptor with a missing page entry
@@ -619,13 +692,13 @@ static void cmmu_command(u32 base, u32 cmd)
     u32 phys  = 0;
     if (walk_fb(apr, vaddr, is_code, &phys)) {
         /* Single-node machine: all RAM is on the master node (node 0).  The
-           kernel derives a page's node from vtop bits 28-23 (_m_expand), and
-           on the identity path our reported PA carries phantom non-zero node
-           bits (kernel data at 0xC1xxxxxx decodes to node 2), which fails the
-           kernel's "pool must be on master node" checks.  Force the node field
-           to 0 for kernel RAM so vtop tells the truth for a 1-node system.
-           (realmm gets correct nodes structurally, so only patch identity.) */
-        if (!realmm && phys >= 0xC0000000u && phys < 0xE0000000u)
+           kernel derives a page's node from vtop bits 28-23 (_m_expand); our
+           reported PA for kernel memory carries phantom non-zero node bits
+           (>8MB in decodes to node 2+), failing the kernel's "pool must be on
+           master node" checks.  Force node 0 for kernel-space vtops so it tells
+           the truth for a 1-node system.  Keyed on the input VA (kernel space)
+           so it works for both identity and realmm (whose PAs are low). */
+        if (vaddr >= 0xC0000000u && vaddr < 0xE0000000u)
             phys &= ~0x1F800000u;
         mem_w32(base + CMMU_SSR, 1);                  /* bit 0 = valid */
         mem_w32(base + CMMU_SAR, phys);
@@ -668,6 +741,20 @@ static u32 xva;   /* --xva: log translations of this VA */
 static inline u32 translate(u32 va, int code)
 {
     if (!translate_on) return va;
+
+    /* realmm: kernel space (>=0xC0000000) is a GLOBAL direct map, identical in
+       every address space.  Resolving it independently of the active APR is
+       essential -- a function that changes the APR mid-execution (e.g. MMU
+       setup routines) must still find its own stack unchanged.  Device pages
+       the kernel mapped into kernel VA go through devmap; the rest is the fixed
+       VA-KOFF direct map; >=0xE0000000 is identity device space. */
+    if (realmm && va >= 0xC0000000u) {
+        if (va >= 0xE0000000u) return va;
+        u32 dp = devmap_lookup(va & ~0xFFFu);
+        if (dp) return dp | (va & 0xFFF);
+        return va - KOFF;
+    }
+
     u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
     if (!(apr & 1)) return va;                 /* translation disabled */
 
@@ -708,7 +795,7 @@ static inline void dev_write32(u32 a, u32 v)
                 printf("[batc] %08x off=0x%x <- %08x\n", a, a - cb, v);
         }
         if (a == CMRAM_SELECT) { cmram_sel = v; return; }
-        if (a == CMRAM_DATA) { mem_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
+        if (a == CMRAM_DATA) { cmram_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
     }
     mem_w32(a, v);
     if (sysmode) {
@@ -736,10 +823,19 @@ static int step(void)
     if (sysmode && force_sig_pc && pc == force_sig_pc)
         cpu.r[2] = force_sig_val;
 
+    /* realmm: snoop the pmap mapper for device mappings (VA=r3 -> PA=r4) */
+    if (realmm && pc == PMAP_MAP_FN && RD(4) >= 0xE0000000u)
+        devmap_add(RD(3), RD(4));
+
+    /* realmm: the kernel stores the TCS mailbox VA (r7) at _pmap_kernel+0xd74;
+       track where it actually resolves so the handshake meets the kernel */
+    if (realmm && pc == 0xC00A0E80u)
+        tcs_mbox_pa = translate(RD(7), 0);
+
     if (watch_pc && pc == watch_pc) {
-        printf("[watch] pc=%08x r1=%08x r2=%08x r4=%08x r27=%08x @%llu\n",
-               pc, RD(1), RD(2), RD(4), RD(27), (unsigned long long)cpu.count);
-        if (0) printf("%08x%08x%08x", RD(3), RD(7), RD(9));
+        printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x @%llu\n",
+               pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6),
+               (unsigned long long)cpu.count);
     }
 
     u32 w   = mem_r32(translate(pc, 1));
@@ -1114,7 +1210,27 @@ static int run_sys(const char *path, u64 limit, u32 sig)
        kernel tries to say, without needing a working console device. */
     clock_t t0 = clock();
     u32 last_fmt = 0;
+    u32 last_kpc = cpu.pc;
     while (cpu.count < limit) {
+        /* derail catcher: kernel boot stays in kernel space (>=0xC0000000);
+           a fetch below it means a bad jump -- report the last kernel pc */
+        if (realmm && cpu.pc < 0xC0000000u) {
+            printf("[derail] jumped to %08x from kernel pc=%08x @%llu\n",
+                   cpu.pc, last_kpc, (unsigned long long)cpu.count);
+            break;
+        }
+        /* halt catcher: _tcs_shutdown+0x38 and _doadump+0x20 are br-to-self
+           spins reached only after a panic/reboot has run its course */
+        if (cpu.pc == 0xC00A24F4u || cpu.pc == 0xC00A24B8u) {
+            printf("[halt] reached %s spin at %08x @%llu\n",
+                   cpu.pc == 0xC00A24F4u ? "tcs_shutdown" : "doadump",
+                   cpu.pc, (unsigned long long)cpu.count);
+            break;
+        }
+        last_kpc = cpu.pc;
+        if (pcsample && (cpu.count % pcsample) == 0)
+            printf("[pc] @%llu pc=%08x\n",
+                   (unsigned long long)cpu.count, cpu.pc);
         if (log_msgs) {
             if (cpu.pc == LOG_ROUTINE) {
                 char fmt[200];
@@ -1239,6 +1355,7 @@ static int run_sys(const char *path, u64 limit, u32 sig)
 int main(int argc, char **argv)
 {
     pages = calloc(NPAGES, sizeof *pages);
+    cmram_pages = calloc(NPAGES, sizeof *cmram_pages);
     if (!pages) { fprintf(stderr, "out of memory\n"); return 1; }
 
     u64 limit = 200000000ull;
@@ -1262,6 +1379,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;
         else if (!strcmp(argv[i], "--realmm")) { realmm = 1; translate_on = 1; ileave_stub = 1; }
         else if (!strcmp(argv[i], "--dbgtrans")) dbg_trans = 1;
+        else if (!strncmp(argv[i], "--pcsample=", 11)) pcsample = strtoull(argv[i]+11,0,0);
         else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
