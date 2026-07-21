@@ -86,6 +86,7 @@ static u32 mem_r32(u32 a)
 }
 
 static u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
+static u32 wval;                      /* --wval=V: trace writes whose value&~0xfff==V */
 static u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range */
 static u32 dbg_pc;                    /* current pc, for trace prints */
 static u64 dbg_count;                 /* current instruction count */
@@ -558,6 +559,19 @@ static int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
     return 1;
 }
 
+/* Walk the kernel's active table, then (realmm) fall back to the synthetic
+   direct-map table so the kernel's own vtop and the CPU's translate() agree. */
+static int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
+{
+    if (mmu_walk(apr, vaddr, phys)) return 1;
+    if (realmm) {
+        u32 syn = code ? CODE_SEGTAB : DATA_SEGTAB;
+        if (mmu_walk(syn | 1, vaddr, phys)) return 1;
+        if (vaddr >= 0xE0000000u) { *phys = vaddr; return 1; }
+    }
+    return 0;
+}
+
 static void cmmu_command(u32 base, u32 cmd)
 {
     /* 0x20/0x24 are the user/supervisor address-probe commands */
@@ -567,8 +581,9 @@ static void cmmu_command(u32 base, u32 cmd)
     }
     u32 vaddr = mem_r32(base + CMMU_SAR);
     u32 apr   = mem_r32(base + (cmd == 0x24 ? CMMU_SAPR : CMMU_UAPR));
+    int is_code = (base == 0xFFF7F000u);
     u32 phys  = 0;
-    if (mmu_walk(apr, vaddr, &phys)) {
+    if (walk_fb(apr, vaddr, is_code, &phys)) {
         mem_w32(base + CMMU_SSR, 1);                  /* bit 0 = valid */
         mem_w32(base + CMMU_SAR, phys);
         probe_hits++;
@@ -617,16 +632,13 @@ static inline u32 translate(u32 va, int code)
     if (tlb[code][idx].tag == (vpn | 0x80000000u))
         return tlb[code][idx].pa | (va & 0xFFF);
 
+    /* walk_fb: kernel's table, then (realmm) the synthetic direct-map table
+       which supplies node-correct physical addresses for kernel memory */
     u32 pa;
-    if (!mmu_walk(apr, va, &pa)) {
-        /* device space (>= 0xE0000000) is fixed-physical, identity-mapped --
-           don't require page tables for it */
-        if (realmm && va >= 0xE0000000u) return va;
+    if (!walk_fb(apr, va, code, &pa)) {
         xlat_faults++;
         last_fault_va = va;
         last_fault_pc = cpu.pc;
-        /* realmm has no identity fallback -- a miss is a genuine unmapped
-           access; log the first few so we can see where it happens */
         if (realmm && xlat_faults <= 20)
             printf("[xlat MISS] va=%08x pc=%08x apr=%08x @%llu\n",
                    va, cpu.pc, apr, (unsigned long long)cpu.count);
@@ -655,9 +667,12 @@ static inline void dev_write32(u32 a, u32 v)
         if (cmmu_base_of(a, &base)) {
             u32 off = a - base;
             if (off == CMMU_SCR) cmmu_command(base, v);
-            else if (mmu_trace && (off == CMMU_SAPR || off == CMMU_UAPR))
-                printf("[cmmu] %08x %s <- %08x   (pc=%08x)\n", base,
-                       off == CMMU_SAPR ? "SAPR" : "UAPR", v, cpu.pc);
+            else if (off == CMMU_SAPR || off == CMMU_UAPR) {
+                tlb_flush();             /* APR changed: drop cached translations */
+                if (mmu_trace)
+                    printf("[cmmu] %08x %s <- %08x   (pc=%08x)\n", base,
+                           off == CMMU_SAPR ? "SAPR" : "UAPR", v, cpu.pc);
+            }
         }
     }
 }
@@ -1198,6 +1213,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
+        else if (!strncmp(argv[i], "--wval=", 7)) wval = (u32)strtoul(argv[i]+7,0,0) & 0xFFFFF000u;
         else if (!strncmp(argv[i], "--wrange=", 9)) {
             wmem_lo = (u32)strtoul(argv[i]+9,0,0);
             char *c = strchr(argv[i]+9, ':'); wmem_hi = c ? (u32)strtoul(c+1,0,0) : wmem_lo+0x1000;
