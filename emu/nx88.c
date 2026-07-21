@@ -72,8 +72,20 @@ static inline u8 *page_of(u32 a)
     return p;
 }
 
+static u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
+static u32 wval;                      /* --wval=V: trace writes whose value&~0xfff==V */
+static u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range */
+static u32 dbg_pc;                    /* current pc, for trace prints */
+static u64 dbg_count;                 /* current instruction count */
+
 static inline u8 mem_r8(u32 a) { return page_of(a)[a & 4095]; }
-static inline void mem_w8(u32 a, u8 v) { page_of(a)[a & 4095] = v; }
+static inline void mem_w8(u32 a, u8 v)
+{
+    if (wmem_addr && (a >= (wmem_addr & ~3u) && a < (wmem_addr & ~3u) + 4))
+        printf("[wmem8] %08x <- %02x  pc=%08x @%llu\n", a, v, dbg_pc,
+               (unsigned long long)dbg_count);
+    page_of(a)[a & 4095] = v;
+}
 
 static u32 mem_r32(u32 a)
 {
@@ -84,12 +96,6 @@ static u32 mem_r32(u32 a)
     return ((u32)mem_r8(a) << 24) | ((u32)mem_r8(a+1) << 16) |
            ((u32)mem_r8(a+2) << 8) | mem_r8(a+3);
 }
-
-static u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
-static u32 wval;                      /* --wval=V: trace writes whose value&~0xfff==V */
-static u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range */
-static u32 dbg_pc;                    /* current pc, for trace prints */
-static u64 dbg_count;                 /* current instruction count */
 
 static void mem_w32(u32 a, u32 v)
 {
@@ -109,7 +115,13 @@ static void mem_w32(u32 a, u32 v)
 }
 
 static u16 mem_r16(u32 a) { return ((u16)mem_r8(a) << 8) | mem_r8(a+1); }
-static void mem_w16(u32 a, u16 v) { mem_w8(a, v >> 8); mem_w8(a+1, v); }
+static void mem_w16(u32 a, u16 v)
+{
+    if (wmem_addr && (a == wmem_addr || a + 1 == wmem_addr || a == wmem_addr + 2))
+        printf("[wmem16] %08x <- %04x  pc=%08x @%llu\n", a, v, dbg_pc,
+               (unsigned long long)dbg_count);
+    mem_w8(a, v >> 8); mem_w8(a+1, v);
+}
 
 static void mem_load(u32 a, const u8 *src, size_t n)
 {
@@ -652,6 +664,7 @@ static void tlb_flush(void)
     memset(tlb, 0, sizeof tlb);
 }
 
+static u32 xva;   /* --xva: log translations of this VA */
 static inline u32 translate(u32 va, int code)
 {
     if (!translate_on) return va;
@@ -666,6 +679,12 @@ static inline u32 translate(u32 va, int code)
     /* walk_fb: kernel's table, then (realmm) the synthetic direct-map table
        which supplies node-correct physical addresses for kernel memory */
     u32 pa;
+    if (xva && (va & ~0xFFFu) == (xva & ~0xFFFu)) {
+        u32 tp; int ok = walk_fb(apr, va, code, &tp);
+        printf("[xva] %08x -> %s pa=%08x apr=%08x pc=%08x @%llu\n",
+               va, ok ? "ok" : "MISS", ok ? tp : 0, apr, cpu.pc,
+               (unsigned long long)dbg_count);
+    }
     if (!walk_fb(apr, va, code, &pa)) {
         xlat_faults++;
         last_fault_va = va;
@@ -1249,6 +1268,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
+        else if (!strncmp(argv[i], "--xva=", 6)) xva = (u32)strtoul(argv[i]+6,0,0);
         else if (!strncmp(argv[i], "--wval=", 7)) wval = (u32)strtoul(argv[i]+7,0,0) & 0xFFFFF000u;
         else if (!strncmp(argv[i], "--wrange=", 9)) {
             wmem_lo = (u32)strtoul(argv[i]+9,0,0);
