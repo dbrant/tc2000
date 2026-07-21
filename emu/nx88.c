@@ -59,6 +59,12 @@ static int dbg_trans;
 static u64 pcsample;
 static int scsi_trace, scsi_trace_n;  /* --scsitrace: log VME controller I/O */
 
+/* Node interrupt controller (0xE0780000): the handler reads the pending source
+   from +0x18 and, via mask tables, routes bit 27 -> _hardclock.  Setting the
+   source to 0x40 selects exactly that bit. */
+#define IRQ_SOURCE_REG 0xE0780018u
+static u32 irq_source;
+
 /* SCSI Host Adapter (sha.o) probe stub.  The controller's dual-port RAM +
    register window sits at VME 0xFC008000; status reg at +0x800, command reg at
    +0x802.  _init_iopb resets it by pulsing the command reg 0x1000->0 and then
@@ -422,6 +428,7 @@ static inline u32 dev_read32(u32 a)
         if (a == TIMER_ADDR) return (u32)(cpu.count * tick_scale);
         if (is_cmmu_id(a))   return cmmu_id_for(a);
         if (a == CMRAM_DATA) { cmram_reads++; return cmram_r32(cmram_sel & ~3u); }
+        if (a == IRQ_SOURCE_REG) return irq_source;   /* pending interrupt src */
         if (a == 0xE07EA008u || a == 0xE07EA010u || a == 0xE07EA028u)
             return 0;                    /* status ports: ready, no error */
     }
@@ -842,6 +849,7 @@ static inline void dev_write32(u32 a, u32 v)
         }
         if (a == CMRAM_SELECT) { cmram_sel = v; return; }
         if (a == CMRAM_DATA) { cmram_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
+        if (a == IRQ_SOURCE_REG) { irq_source = v; return; } /* ack clears src */
     }
     mem_w32(a, v);
     if (sysmode) {
@@ -860,11 +868,49 @@ static inline void dev_write32(u32 a, u32 v)
     }
 }
 
+/*
+ * MC88100 exception/interrupt delivery.
+ *
+ * The RTE side already exists (restore PSR from EPSR, resume at SNIP).  This is
+ * the entry side: save PSR->EPSR and the resume pointer into SXIP/SNIP/SFIP,
+ * put the CPU in the exception state (supervisor, interrupts disabled, shadow
+ * frozen), and vector to VBR + vector*8 -- where the kernel's vector table
+ * (an 8-byte `nop; br handler` per vector) sends control to the real handler.
+ * Interrupts are checked between instructions (never mid-delay-slot), so the
+ * resume point is simply the not-yet-executed instruction at cpu.pc.
+ */
+static void deliver_exception(u32 vector)
+{
+    cpu.cr[2] = cpu.cr[1];                  /* EPSR = PSR                     */
+    /* Interrupt taken between instructions: the execute stage is empty, so
+       SXIP is INVALID (V=bit1 clear) and the resume point is SNIP.  Marking
+       SXIP invalid is what lets the kernel's saveregs (which nulls SNIP and
+       points SFIP at _hardclock_interface) fall through to SFIP on its rte. */
+    cpu.cr[4] = cpu.pc;                      /* SXIP = pc, invalid (V=0)       */
+    cpu.cr[5] = cpu.pc | 2u;                /* SNIP = resume pc, valid        */
+    cpu.cr[6] = (cpu.pc + 4u) | 2u;         /* SFIP valid                     */
+    cpu.cr[1] = cpu.cr[1] | 0x80000003u;    /* supervisor | IND | SFRZ        */
+    cpu.pc = cpu.cr[7] + vector * 8u;       /* VBR + vector*8                 */
+}
+
+static int clock_irq;
+static u64 clock_period = 100000, next_clock;
+
 /* Execute one instruction.  Returns 1 on trap. */
 static int step(void)
 {
     u32 pc = cpu.pc;
     dbg_pc = pc; dbg_count = cpu.count;
+
+    /* Deliver a periodic hardclock interrupt once the kernel has enabled
+       interrupts (PSR IND clear) and we are at an instruction boundary. */
+    if (clock_irq && sysmode && !cpu.has_pending && !(cpu.cr[1] & 2u)
+        && cpu.cr[7] >= 0xC0000000u && cpu.count >= next_clock) {
+        next_clock = cpu.count + clock_period;
+        irq_source = 0x40;                  /* hardclock (bit 27) */
+        deliver_exception(1);               /* interrupt vector */
+        return 0;
+    }
 
     if (sysmode && force_sig_pc && pc == force_sig_pc)
         cpu.r[2] = force_sig_val;
@@ -984,17 +1030,28 @@ static int step(void)
             }
         } else if (sub >= 0x20 && sub <= 0x2A) {              /* bit-field    */
             bitfield(sub, D, a, (b >> 5) & 31, b & 31);
+        } else if (sub == 0x3A) {          /* ff1: bit# of highest set bit    */
+            WR(D, b ? (u32)(31 - __builtin_clz(b)) : 32u);
+        } else if (sub == 0x3B) {          /* ff0: bit# of highest clear bit  */
+            u32 nb = ~b;
+            WR(D, nb ? (u32)(31 - __builtin_clz(nb)) : 32u);
         } else if (sub >= 0x30 && sub <= 0x33) {              /* jmp / jsr    */
             delayed = sub & 1;
             if (sub >= 0x32) WR(1, delayed ? pc + 8 : pc + 4);
             branch = b & ~3u;
             taken = 1;
         } else if (sub == 0x3F) {                             /* rte          */
-            /* Return from exception: resume at SNIP (cr5), the saved next
-               instruction pointer, with its V/E control bits masked off.  The
-               kernel uses this to launch processes and return from faults. */
+            /* Return from exception: restore PSR from EPSR and resume at the
+               first VALID pipeline register -- SXIP, then SNIP, then SFIP (the
+               V bit is bit 1).  The kernel relies on this ordering: saveregs
+               invalidates SNIP and points SFIP at a continuation to "call" it
+               via rte, and interrupt entry invalidates SXIP so the real resume
+               point is SNIP.  Process launch / fault return set SNIP valid. */
             cpu.cr[1] = cpu.cr[2];       /* restore PSR from EPSR */
-            branch = cpu.cr[5] & ~3u;
+            u32 r = (cpu.cr[4] & 2u) ? cpu.cr[4]
+                  : (cpu.cr[5] & 2u) ? cpu.cr[5]
+                                     : cpu.cr[6];
+            branch = r & ~3u;
             taken = 1;
         } else {
             goto badinsn;
@@ -1249,6 +1306,10 @@ static int run_sys(const char *path, u64 limit, u32 sig)
     memset(&cpu, 0, sizeof cpu);
     cpu.pc = a.entry;
     WR(31, DATA_BASE + a.data + a.bss + 0x8000);
+    /* Reset PSR: supervisor + interrupts disabled (IND) + shadow frozen, like
+       the MC88100 at reset.  The kernel clears IND once its vector table and
+       interrupt handlers are up, which is when clock delivery may begin. */
+    cpu.cr[1] = 0x80000003u;
 
     /* Kernel message capture.  subr_prf.o's formatter is reached two ways:
        log(tag, fmt, ...) at LOG_ROUTINE, and printf_throttle(fmt, args)
@@ -1427,6 +1488,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--identity")) identity_mode = 1;
         else if (!strcmp(argv[i], "--dbgtrans")) dbg_trans = 1;
         else if (!strcmp(argv[i], "--scsitrace")) scsi_trace = 1;
+        else if (!strcmp(argv[i], "--clock")) clock_irq = 1;
+        else if (!strncmp(argv[i], "--clock=", 8)) { clock_irq = 1; clock_period = strtoull(argv[i]+8,0,0); }
         else if (!strncmp(argv[i], "--pcsample=", 11)) pcsample = strtoull(argv[i]+11,0,0);
         else if (!strcmp(argv[i], "--ileave")) ileave_stub = 1;
         else if (!strncmp(argv[i], "--dump=", 7)) dump_addr = (u32)strtoul(argv[i]+7,0,0);
