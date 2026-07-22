@@ -473,6 +473,8 @@ static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes *
 static int  uland_probe;              /* dump run queue at the swapper sleep */
 static int  deliver_traps;            /* deliver user traps to kernel handlers */
 static int  trace_traps;              /* log each delivered trap */
+static u64  trace_pc_until;           /* print PCs until this instruction count */
+static u32  utrap_vec = 128;        /* --utest syscall trap vector */
 static u64  probe_hits, probe_misses;
 
 /*
@@ -922,8 +924,13 @@ static void deliver_trap(u32 vector, u32 tpc)
        SFIP continuation; the trap PC lives in SNIP (valid) as the resume base
        the syscall dispatch adjusts (+4 err / +8 ok). */
     cpu.cr[4] = tpc;                        /* SXIP = tpc, INVALID (V=0)       */
-    cpu.cr[5] = tpc | 2u;                   /* SNIP = tpc, valid               */
-    cpu.cr[6] = (tpc + 4u) | 2u;            /* SFIP valid                      */
+    /* The trapping instruction HAS executed, so the resume point is the NEXT
+       instruction: SNIP = tpc+4 (valid), SFIP = tpc+8.  This is what makes the
+       nX syscall convention land correctly -- the handler returns to SNIP on
+       error (tpc+4) and SNIP+4 on success (tpc+8).  Setting SNIP = tpc instead
+       re-executes the trap forever. */
+    cpu.cr[5] = (tpc + 4u) | 2u;            /* SNIP = next instruction, valid  */
+    cpu.cr[6] = (tpc + 8u) | 2u;            /* SFIP valid                      */
     cpu.cr[1] = cpu.cr[1] | 0x80000003u;    /* supervisor | IND | SFRZ         */
     cpu.pc = cpu.cr[7] + vector * 8u;       /* VBR + vector*8                  */
     cpu.has_pending = 0;                    /* abandon any pending delay slot  */
@@ -1118,6 +1125,19 @@ static int step(void)
                 link = nx;
             }
         }
+    }
+
+    /* debug: pipeline state at load_context's rte -- only for switches that
+       land in USER mode (EPSR bit31 clear); the 64 boot switches are all
+       supervisor and would just be noise. */
+    if (trace_traps && sysmode && pc == 0xC00175C0u && !(cpu.cr[2] & 0x80000000u)) {
+        u32 cuapr = mem_r32(0xFFF7F000u + CMMU_UAPR);
+        u32 duapr = mem_r32(0xFFF7E000u + CMMU_UAPR);
+        u32 pa1000 = 0; (void)mmu_walk(cuapr, 0x1000u, &pa1000);
+        printf("[ldctx-rte] PSR=%08x EPSR=%08x SXIP=%08x SNIP=%08x SFIP=%08x\n"
+               "            codeUAPR=%08x dataUAPR=%08x  user0x1000 -> pa=%08x word=%08x\n",
+               cpu.cr[1], cpu.cr[2], cpu.cr[4], cpu.cr[5], cpu.cr[6],
+               cuapr, duapr, pa1000, pa1000 ? mem_r32(pa1000) : 0);
     }
 
     /* Deliver a periodic hardclock interrupt once the kernel has enabled
@@ -1554,6 +1574,77 @@ static void umap(u32 segtab, u32 va, u32 pa)
     else { pgtab = upool_alloc(); mem_w32(segtab + sidx * 4, pgtab | 1); }
     mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, (pa & 0xFFFFF000u) | 1);
 }
+/* Synthesize proc1: a real, scheduler-selectable process whose saved context
+   resumes directly in USER mode.  Rather than build a proc struct field-by-field
+   (most of the Mach layout is unknown), clone proc0's proc + context as a
+   template so every field we don't understand stays plausible, then override
+   only what makes it a user process:
+     ctx+0x80 = resume PC (load_context puts it in SNIP and rte's there)
+     ctx+0x8c = EPSR with bit31 CLEAR -> the rte lands in user mode
+     ctx+0x7c = r31 = user stack pointer
+   Finally splice it onto the head of the run queue (circular list, head at
+   0xC0014498, forward link [proc+0], back link [proc+4]) so _swtch_pri picks it
+   instead of proc0 -- which is what made the previous switch a no-op self-switch. */
+static u32 create_proc1(u32 user_pc, u32 user_sp, u32 usegtab)
+{
+    u32 cp   = mem_r32(translate(0xFBFFE0F0u, 0));   /* proc0            */
+    u32 cctx = mem_r32(translate(cp + 0xc8, 0));     /* proc0's context  */
+
+    u32 P = upool_next; upool_next += 0x4000u;       /* proc + u-area    */
+    u32 C = upool_next; upool_next += PAGE_SIZE;     /* saved context    */
+
+    for (u32 i = 0; i < 0x4000u; i += 4)             /* clone proc0      */
+        mem_w32(translate(P + i, 0), mem_r32(translate(cp + i, 0)));
+    for (u32 i = 0; i < 0x100u; i += 4)              /* clone its context*/
+        mem_w32(translate(C + i, 0), mem_r32(translate(cctx + i, 0)));
+
+    mem_w32(translate(P + 0xc8, 0), C);              /* proc1 -> context */
+    mem_w32(translate(C + 0x80, 0), user_pc);        /* resume PC        */
+    mem_w32(translate(C + 0x8c, 0), 0u);             /* EPSR: user mode  */
+    mem_w32(translate(C + 0x7c, 0), user_sp);        /* user SP          */
+    /* Address space: load_context calls pmap_activate (_dummy_use_value
+       c00a30c0) with r2 = ctx+0xa4, which does UAPR/SAPR = [ctx+0xa4] |
+       0x80000000.  Point it at our synthetic user segment table so the
+       switched-to process sees the user program. */
+    mem_w32(translate(C + 0xa4, 0), usegtab | 1u);
+    /* Give proc1 its OWN u-area.  load_context maps the u-area by writing the
+       two physical pages named in ctx+0x98 into a fixed per-node page-table
+       slot -- the classic BSD arrangement where the u-area lives at a constant
+       kernel VA and the switch remaps the physical pages behind it.  Cloning
+       proc0's u-area content gives proc1 a structurally valid PCB/kernel stack
+       to start from; the trap's saveregs then builds its own frame there. */
+    {
+        u32 u0 = mem_r32(translate(cctx + 0x98, 0));   /* proc0's u-area (phys) */
+        u32 U  = upool_next; upool_next += 0x2000u;    /* 2 pages, physical     */
+        /* ZERO it rather than clone.  fpipe only writes the DMT/fault slots of
+           the trap frame when there is a valid data transaction; anything it
+           skips keeps whatever was already in the u-area.  Cloned garbage there
+           reads back as pending FP/data exceptions, and exreturn then returns
+           non-zero -- making trap() bail before it ever dispatches the syscall. */
+        for (u32 i = 0; i < 0x2000u; i += 4) mem_w32(U + i, 0);
+        mem_w32(translate(C + 0x98, 0), U);
+        printf("[utest]   proc1 u-area %08x (zeroed; proc0's was %08x)\n", U, u0);
+    }
+
+    /* splice onto the head of the run queue so swtch_pri selects proc1 */
+    u32 rq = 0xC0014498u;
+    u32 first = mem_r32(translate(rq, 0));
+    mem_w32(translate(P + 0, 0), first);
+    mem_w32(translate(P + 4, 0), rq);
+    if (first >= 0xC0000000u) mem_w32(translate(first + 4, 0), P);
+    mem_w32(translate(rq, 0), P);
+
+    printf("[utest] proc1=%08x ctx=%08x (cloned from proc0=%08x/%08x), "
+           "queued at runq head\n", P, C, cp, cctx);
+    printf("[utest]   ctx +7c(sp)=%08x +80(pc)=%08x +8c(epsr)=%08x\n"
+           "[utest]   ctx +98(uarea)=%08x +a0(pmap)=%08x +a4(aspace)=%08x +dc=%08x\n",
+           mem_r32(translate(C + 0x7c, 0)), mem_r32(translate(C + 0x80, 0)),
+           mem_r32(translate(C + 0x8c, 0)),
+           mem_r32(translate(C + 0x98, 0)), mem_r32(translate(C + 0xa0, 0)),
+           mem_r32(translate(C + 0xa4, 0)), mem_r32(translate(C + 0xdc, 0)));
+    return P;
+}
+
 static void launch_utest(void)
 {
     u32 segtab  = upool_alloc();
@@ -1561,12 +1652,17 @@ static void launch_utest(void)
     u32 stackpa = upool_alloc();
     u32 uva = 0x1000u;
     /* getpid (syscall 20), then spin at the error and success return points */
-    static const u32 prog[] = {
+    /* Syscall trap vector = 128, exactly as nX user binaries issue it
+       (`or r9,r0,N; tb0 0,r0,128`; see ../tapeimage/bin/echo).  Vector 0x73
+       (_Xsyscall) is a separate trap whose trap() case just runs the exception
+       exit path.  --utrap=N overrides for experiments. */
+    static u32 prog[] = {
         0x59200014u,   /* or  r9, r0, 20   ; getpid            */
-        0xf000d080u,   /* tb0 0, r0, 128   ; syscall trap      */
+        0xf000d073u,   /* tb0 0, r0, 0x73  ; syscall trap      */
         0xc0000000u,   /* br  .            ; error   (pc+4)    */
         0xc0000000u,   /* br  .            ; success (pc+8)    */
     };
+    prog[1] = 0xf000d000u | (utrap_vec & 0x1FFu);
     for (unsigned i = 0; i < sizeof prog / 4; i++) mem_w32(codepa + i * 4, prog[i]);
     umap(segtab, uva, codepa);
     umap(segtab, 0xE000u, stackpa);
@@ -1593,6 +1689,12 @@ static void launch_utest(void)
         mem_w32(translate(head, 0), thr);
         printf("[utest] added thread %08x to curproclist[%u]\n", thr, node);
     }
+    /* Create proc1: a real scheduler-selectable process that resumes in user
+       mode at the same program.  When the syscall's trap-return reschedule
+       runs, _swtch_pri should now pick proc1 (queued ahead of proc0) and
+       load_context it -- landing in user mode as a properly scheduled thread. */
+    create_proc1(uva, 0xF000u, segtab);
+
     cpu.cr[17] = RD(31);                            /* SR1 = kernel stack */
     WR(31, 0xF000u);                                /* user stack pointer */
     cpu.pc = uva;
@@ -1702,6 +1804,8 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             }
             break;
         }
+        if (trace_pc_until && cpu.count < trace_pc_until)
+            printf("[pctrace] %08x\n", cpu.pc);
         last_kpc = cpu.pc;
         if (pcsample && (cpu.count % pcsample) == 0)
             printf("[pc] @%llu pc=%08x\n",
@@ -1776,6 +1880,7 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                            trap_vector, trap_vector, trap_pc, cpu.cr[1],
                            (unsigned long long)cpu.count);
                 deliver_trap(trap_vector, trap_pc);
+                if (trace_traps) trace_pc_until = cpu.count + 400;
                 trap_taken = 0;
                 continue;
             }
@@ -1885,6 +1990,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--deliver-traps")) deliver_traps = 1;
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--utest")) { utest = 1; deliver_traps = 1; trace_traps = 1; }
+        else if (!strncmp(argv[i], "--utrap=", 8)) utrap_vec = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--xva=", 6)) xva = (u32)strtoul(argv[i]+6,0,0);
