@@ -260,6 +260,11 @@ static inline void tcs_poke(u32 a);           /* TCS mailbox handshake */
 /* forward decls so memop can service the free-running timer at all widths */
 static int  sysmode;
 static u32  tick_scale = 2000;
+/* Completion status the SHA reports at base+0x73c after a queue-mode command.
+   shareset does `bb0 5, status` and complains "start queue_mode: funny status
+   0x%x" unless bit 5 is set -- which is why the old value of 1 produced exactly
+   that message on every boot.  --shadone=N overrides for experiments. */
+static u32  sha_done_status = 0x20;
 #define TIMER_ADDR 0xE07E8018u
 
 /* memory-op helper shared by the immediate and triadic forms */
@@ -272,7 +277,7 @@ static void memop(u32 sub, u32 D, u32 ea)
        translates before touching memory. */
     if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
     ea = translate(ea, 0);
-    if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 400) {
+    if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 100000) {
         int st = (sub >= 0x08 && sub <= 0x0B);
         printf("[scsi] %-2s %08x sub=%x val=%08x pc=%08x @%llu\n",
                st ? "WR" : "RD", ea, sub, st ? RD(D) : 0, dbg_pc,
@@ -283,8 +288,13 @@ static void memop(u32 sub, u32 D, u32 ea)
         u16 v = (u16)RD(D);
         if (v == 0x1000) sha_status = 1;                   /* reset: busy   */
         else if (v == 0) sha_status = 2;                   /* pulse done: ready */
-        else if (v == 1)                                   /* command: complete it */
-            mem_w16(SHA_BASE + 0x73c, 1);   /* driver polls +0x73c for done */
+        else if (v == 1) {                                 /* command: complete it */
+            mem_w16(SHA_BASE + 0x73c, (u16)sha_done_status);
+            if (scsi_trace)
+                printf("[sha] cmd=1: poked %08x = %04x, reads back %04x\n",
+                       SHA_BASE + 0x73c, (u16)sha_done_status,
+                       mem_r16(SHA_BASE + 0x73c));
+        }
         mem_w16(ea, v);
         return;
     }
@@ -2870,6 +2880,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--kmsg")) kmsgs = 1;
+        else if (!strncmp(argv[i], "--shadone=", 10)) sha_done_status = (u32)strtoul(argv[i]+10,0,0);
         else if (!strcmp(argv[i], "--brk-passthru")) brk_passthru = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
