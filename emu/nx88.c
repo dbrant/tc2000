@@ -265,6 +265,12 @@ static u32  tick_scale = 2000;
    0x%x" unless bit 5 is set -- which is why the old value of 1 produced exactly
    that message on every boot.  --shadone=N overrides for experiments. */
 static u32  sha_done_status = 0x20;
+/* Bits a completion clears in the driver's descriptor at +4: bit 2 = error,
+   and, with --scsi, bit 4 = command outstanding.  Clearing bit 4 gets shareset
+   past "SHA_WORKQ_INIT still asserted" and into the target-probe loop -- which
+   then forks a kernel process (procdup) whose child we cannot yet resume, so
+   it stays opt-in until that works.  --shadesc=N overrides. */
+static u32  sha_desc_clear = 0x04;
 #define TIMER_ADDR 0xE07E8018u
 
 /* memory-op helper shared by the immediate and triadic forms */
@@ -999,7 +1005,11 @@ static void sha_complete(void)
     u32 desc = RD(27);
     if (desc >= 0xC0000000u) {
         u32 pa = translate(desc + 4, 0);
-        mem_w32(pa, mem_r32(pa) & ~4u);      /* clear error bit (bit 2) */
+        /* Bit 2 is the error flag.  Bit 4 is the "command still outstanding"
+           flag shareset tests the instant it wakes (`ld r6,[r27+4]; bb0 4`);
+           leaving it set is what produced "SHA_WORKQ_INIT still asserted" and
+           stopped the target-probe loop before sdprobe ever ran. */
+        mem_w32(pa, mem_r32(pa) & ~sha_desc_clear);
     }
     if (scsi_trace) {
         printf("[sha] complete: caller=%08x desc=%08x r4(lock?)=%08x chan=%08x @%llu\n",
@@ -2563,6 +2573,15 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         if (realmm && cpu.pc < 0xC0000000u && (cpu.cr[1] & 0x80000000u)) {
             printf("[derail] jumped to %08x from kernel pc=%08x @%llu\n",
                    cpu.pc, last_kpc, (unsigned long long)cpu.count);
+            printf("[derail] last sleep: chan=%08x from=%08x\n",
+                   last_sleep_chan, last_sleep_from);
+            if (dump_pchist) {
+                printf("--- last %d PCs before the derail ---\n", PCH_N);
+                for (unsigned k = 0; k < PCH_N; k++)
+                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                           (k % 8 == 7) ? "\n" : " ");
+                printf("\n");
+            }
             break;
         }
         /* BOOT COMPLETE: the swapper's sched() idle loop is `for(;;)
@@ -2881,6 +2900,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--kmsg")) kmsgs = 1;
         else if (!strncmp(argv[i], "--shadone=", 10)) sha_done_status = (u32)strtoul(argv[i]+10,0,0);
+        else if (!strcmp(argv[i], "--scsi")) sha_desc_clear = 0x14;
+        else if (!strncmp(argv[i], "--shadesc=", 10)) sha_desc_clear = (u32)strtoul(argv[i]+10,0,0);
         else if (!strcmp(argv[i], "--brk-passthru")) brk_passthru = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
