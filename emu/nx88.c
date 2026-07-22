@@ -475,6 +475,7 @@ static int  deliver_traps;            /* deliver user traps to kernel handlers *
 static int  trace_traps;              /* log each delivered trap */
 static u64  trace_pc_until;           /* print PCs until this instruction count */
 static u32  utrap_vec = 128;        /* --utest syscall trap vector */
+static const char *uprog_path;      /* --uprog=PATH: real binary for proc1 */
 static u64  probe_hits, probe_misses;
 
 /*
@@ -1574,6 +1575,60 @@ static void umap(u32 segtab, u32 va, u32 pa)
     else { pgtab = upool_alloc(); mem_w32(segtab + sidx * 4, pgtab | 1); }
     mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, (pa & 0xFFFFF000u) | 1);
 }
+/* Write into the synthetic user address space (walking our own segment table). */
+static void uwrite8(u32 segtab, u32 va, u8 b)
+{
+    u32 pa;
+    if (mmu_walk(segtab | 1u, va, &pa)) mem_w8(pa, b);
+}
+static void uwrite32(u32 segtab, u32 va, u32 v)
+{
+    uwrite8(segtab, va,     (u8)(v >> 24)); uwrite8(segtab, va + 1, (u8)(v >> 16));
+    uwrite8(segtab, va + 2, (u8)(v >> 8));  uwrite8(segtab, va + 3, (u8)v);
+}
+
+/* Load a real nX a.out into the user address space, the same layout run_user
+   uses: text at VA 0, data page-aligned after it, then bss, and a stack topped
+   at STACK_TOP with argc/argv.  Backing pages come from our private pool and
+   are mapped through the synthetic user segment table. */
+static int load_user_prog(const char *path, u32 segtab, u32 *entry, u32 *sp_out)
+{
+    AOut a;
+    if (aout_load(path, &a)) return -1;
+    u32 dv = (a.text + 4095) & ~4095u;
+    u32 total = dv + a.data + a.bss;
+
+    for (u32 va = 0; va < total; va += PAGE_SIZE) {
+        u32 pg = upool_alloc();                       /* zeroed */
+        umap(segtab, va, pg);
+        for (u32 i = 0; i < PAGE_SIZE; i++) {
+            u32 o = va + i; u8 b = 0;
+            if (o < a.text)                       b = a.img[HDR_PAGE + o];
+            else if (o >= dv && o < dv + a.data)  b = a.img[HDR_PAGE + a.text + (o - dv)];
+            mem_w8(pg + i, b);                        /* bss stays zero */
+        }
+    }
+    /* stack pages just below STACK_TOP */
+    u32 top = STACK_TOP;
+    for (u32 i = 0; i < 8; i++) umap(segtab, top - (i + 1) * PAGE_SIZE, upool_alloc());
+
+    /* argv[0] = the program name, then { argc, argv[0], NULL } */
+    u32 sp = top, l = (u32)strlen(path) + 1;
+    sp -= l;
+    for (u32 i = 0; i < l; i++) uwrite8(segtab, sp + i, (u8)path[i]);
+    u32 argp = sp;
+    sp = (sp & ~7u) - 12u;
+    sp &= ~7u;
+    uwrite32(segtab, sp,     1);
+    uwrite32(segtab, sp + 4, argp);
+    uwrite32(segtab, sp + 8, 0);
+
+    *entry = a.entry; *sp_out = sp;
+    printf("[utest] loaded %s: text=%u data=%u@%08x bss=%u entry=%08x sp=%08x\n",
+           path, a.text, a.data, dv, a.bss, a.entry, sp);
+    return 0;
+}
+
 /* Synthesize proc1: a real, scheduler-selectable process whose saved context
    resumes directly in USER mode.  Rather than build a proc struct field-by-field
    (most of the Mach layout is unknown), clone proc0's proc + context as a
@@ -1666,6 +1721,13 @@ static void launch_utest(void)
     for (unsigned i = 0; i < sizeof prog / 4; i++) mem_w32(codepa + i * 4, prog[i]);
     umap(segtab, uva, codepa);
     umap(segtab, 0xE000u, stackpa);
+    /* --uprog=PATH: run a real nX binary from the extracted tape instead of the
+       4-instruction probe.  Overrides the entry PC and stack. */
+    u32 usp = 0xF000u;
+    if (uprog_path && load_user_prog(uprog_path, segtab, &uva, &usp) != 0) {
+        fprintf(stderr, "[utest] could not load %s\n", uprog_path);
+        uprog_path = NULL;
+    }
     mem_w32(0xFFF7E000u + CMMU_UAPR, segtab | 1);   /* data UAPR */
     mem_w32(0xFFF7F000u + CMMU_UAPR, segtab | 1);   /* code UAPR */
     /* A trap from user mode switches the kernel to the stack in SR1(cr17):
@@ -1693,10 +1755,10 @@ static void launch_utest(void)
        mode at the same program.  When the syscall's trap-return reschedule
        runs, _swtch_pri should now pick proc1 (queued ahead of proc0) and
        load_context it -- landing in user mode as a properly scheduled thread. */
-    create_proc1(uva, 0xF000u, segtab);
+    create_proc1(uva, usp, segtab);
 
     cpu.cr[17] = RD(31);                            /* SR1 = kernel stack */
-    WR(31, 0xF000u);                                /* user stack pointer */
+    WR(31, usp);                                    /* user stack pointer */
     cpu.pc = uva;
     cpu.cr[1] = 0u;                                 /* user mode, interrupts on */
     printf("[utest] user @VA %08x segtab=%08x kstack(cr17)=%08x; dropping to "
@@ -1876,8 +1938,8 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             if (deliver_traps && trap_vector != (u32)-1
                 && cpu.cr[7] >= 0xC0000000u) {
                 if (trace_traps)
-                    printf("[trap] vector %u (0x%x) at pc=%08x psr=%08x @%llu\n",
-                           trap_vector, trap_vector, trap_pc, cpu.cr[1],
+                    printf("[trap] vec %u pc=%08x  syscall r9=%-4u args %08x %08x %08x @%llu\n",
+                           trap_vector, trap_pc, RD(9), RD(2), RD(3), RD(4),
                            (unsigned long long)cpu.count);
                 deliver_trap(trap_vector, trap_pc);
                 if (trace_traps) trace_pc_until = cpu.count + 400;
@@ -1991,6 +2053,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--utest")) { utest = 1; deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--utrap=", 8)) utrap_vec = (u32)strtoul(argv[i]+8,0,0);
+        else if (!strncmp(argv[i], "--uprog=", 8)) { uprog_path = argv[i]+8; utest = 1; deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--wmem=", 7)) wmem_addr = (u32)strtoul(argv[i]+7,0,0);
         else if (!strncmp(argv[i], "--xva=", 6)) xva = (u32)strtoul(argv[i]+6,0,0);
