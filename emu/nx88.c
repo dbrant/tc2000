@@ -469,6 +469,7 @@ static u32  dump_addr;
 static u32  findpt_va;
 static u32  watch_pc;
 static int  dump_pchist;
+static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
 static int  deliver_traps;            /* deliver user traps to kernel handlers */
@@ -804,6 +805,9 @@ static void tlb_flush(void)
 }
 
 static u32 xva;   /* --xva: log translations of this VA */
+/* Demand-page the synthetic user address space (defined with the upool code
+   below).  Returns a physical page for `va`, or 0 if `apr` is not ours. */
+static u32 udemand_page(u32 apr, u32 va);
 static inline u32 translate(u32 va, int code)
 {
     if (!translate_on) return va;
@@ -844,6 +848,13 @@ static inline u32 translate(u32 va, int code)
                (unsigned long long)dbg_count);
     }
     if (!walk_fb(apr, va, code, &pa)) {
+        /* Demand paging for our synthetic user space.  The kernel's VM has no
+           idea this address space exists, so a real vector-2 fault would find
+           no vm_map entry; instead we do what the pager would: hand out a
+           zeroed page and map it.  This is what lets obreak's heap growth and
+           deep stacks actually be touchable. */
+        u32 dp = udemand_page(apr, va);
+        if (dp) return dp | (va & 0xFFF);
         xlat_faults++;
         last_fault_va = va;
         last_fault_pc = cpu.pc;
@@ -1575,6 +1586,94 @@ static void umap(u32 segtab, u32 va, u32 pa)
     else { pgtab = upool_alloc(); mem_w32(segtab + sidx * 4, pgtab | 1); }
     mem_w32(pgtab + ((va >> 12) & 0x3FF) * 4, (pa & 0xFFFFF000u) | 1);
 }
+/* The segment table backing proc1's address space, once launch_utest builds it.
+   Both UAPR and SAPR point here while proc1 runs (pmap_activate sets both), so
+   a miss on either side with this APR is a fault in the user program. */
+static u32 usegtab_cur;
+static unsigned udemand_count;
+static u32 udemand_page(u32 apr, u32 va)
+{
+    if (!usegtab_cur || (apr & 0xFFFFF000u) != usegtab_cur) return 0;
+    if (va >= 0xC0000000u) return 0;
+    u32 pg = upool_alloc();
+    umap(usegtab_cur, va, pg);
+    tlb_flush();
+    if (++udemand_count <= 32)
+        printf("[upage] demand-mapped va %08x -> pa %08x (pc=%08x)\n",
+               va & ~0xFFFu, pg, cpu.pc);
+    return pg;
+}
+
+/* ---------------------------------------------------------------- console
+   nX's console is driven through the TCS mailbox, which we model only far
+   enough to boot -- so there is no character device a process could open for
+   its terminal.  Rather than build one, we service the three standard
+   descriptors in the emulator, exactly as the buffer cache's disk reads are
+   serviced: intercept read/write/ioctl/close on fds 0-2 at the syscall trap and
+   satisfy them against the host's own stdin/stdout.
+
+   The one hazard is fd numbering.  proc1 starts with an empty descriptor table,
+   so the kernel's first real open() hands back fd 0 -- which would then collide
+   with our stdin.  So we track ownership: any descriptor the kernel allocates
+   is marked kernel-owned and passes straight through, and close() releases it
+   again.  Only descriptors the kernel has NOT allocated are treated as the
+   console. */
+static int  console_io = 1;                 /* --no-console disables      */
+static u8   fd_kernel[64];                  /* fd allocated by the kernel */
+static u32  fd_watch_pc;                    /* trap pc of an fd-returning syscall */
+static u32  con_out_bytes, con_in_bytes;
+
+static int fd_is_console(u32 fd)
+{
+    return console_io && fd < 3 && !fd_kernel[fd];
+}
+
+/* Service a syscall entirely in the emulator.  Returns 1 if handled, and
+   leaves the result in r2 with the pc advanced past the error branch. */
+static int console_syscall(u32 sysno, u32 tpc)
+{
+    u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
+    long ret;
+    switch (sysno) {
+    case 4:                                            /* write(fd, buf, n) */
+        if (!fd_is_console(a0)) return 0;
+        for (u32 i = 0; i < a2 && i < (1u << 20); i++)
+            fputc(mem_r8(translate(a1 + i, 0)), a0 == 2 ? stderr : stdout);
+        fflush(a0 == 2 ? stderr : stdout);
+        con_out_bytes += a2;
+        ret = (long)a2;
+        break;
+    case 3: {                                          /* read(fd, buf, n)  */
+        if (!fd_is_console(a0)) return 0;
+        u32 n = a2 > 4096 ? 4096 : a2;
+        u8 tmp[4096];
+        size_t got = n ? fread(tmp, 1, 1, stdin) : 0;   /* line-ish: 1 byte at a time */
+        while (got && got < n && tmp[got - 1] != '\n') {
+            size_t g2 = fread(tmp + got, 1, 1, stdin);
+            if (!g2) break;
+            got += g2;
+        }
+        for (size_t i = 0; i < got; i++) mem_w8(translate(a1 + (u32)i, 0), tmp[i]);
+        con_in_bytes += (u32)got;
+        ret = (long)got;
+        break;
+    }
+    case 6:                                            /* close(fd)         */
+        if (!fd_is_console(a0)) return 0;
+        ret = 0;
+        break;
+    case 54:                                           /* ioctl(fd, ...)    */
+        if (!fd_is_console(a0)) return 0;
+        ret = 0;                                       /* yes, it's a tty   */
+        break;
+    default:
+        return 0;
+    }
+    WR(2, (u32)ret);
+    cpu.pc = tpc + 8;                                  /* success return    */
+    return 1;
+}
+
 /* Write into the synthetic user address space (walking our own segment table). */
 static void uwrite8(u32 segtab, u32 va, u8 b)
 {
@@ -1591,7 +1690,15 @@ static void uwrite32(u32 segtab, u32 va, u32 v)
    uses: text at VA 0, data page-aligned after it, then bss, and a stack topped
    at STACK_TOP with argc/argv.  Backing pages come from our private pool and
    are mapped through the synthetic user segment table. */
-static int load_user_prog(const char *path, u32 segtab, u32 *entry, u32 *sp_out)
+#define MAX_UARGV 32
+#define MAX_UENVP 32
+static const char *uargv[MAX_UARGV];
+static const char *uenvp[MAX_UENVP];
+static unsigned nuargv, nuenvp;
+
+static int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_out,
+                             const char **av, unsigned nav,
+                             const char **ev, unsigned nev)
 {
     AOut a;
     if (aout_load(path, &a)) return -1;
@@ -1612,20 +1719,291 @@ static int load_user_prog(const char *path, u32 segtab, u32 *entry, u32 *sp_out)
     u32 top = STACK_TOP;
     for (u32 i = 0; i < 8; i++) umap(segtab, top - (i + 1) * PAGE_SIZE, upool_alloc());
 
-    /* argv[0] = the program name, then { argc, argv[0], NULL } */
-    u32 sp = top, l = (u32)strlen(path) + 1;
-    sp -= l;
-    for (u32 i = 0; i < l; i++) uwrite8(segtab, sp + i, (u8)path[i]);
-    u32 argp = sp;
-    sp = (sp & ~7u) - 12u;
-    sp &= ~7u;
-    uwrite32(segtab, sp,     1);
-    uwrite32(segtab, sp + 4, argp);
-    uwrite32(segtab, sp + 8, 0);
+    /* Build the standard BSD startup stack: the strings at the very top, then
+       { argc, argv[0..n-1], NULL, envp[0..m-1], NULL } that crt0 unpacks. */
+    u32 sp = top;
+    u32 sptr[MAX_UARGV + MAX_UENVP + 2];
+    unsigned ns = 0;
+    for (unsigned k = 0; k < nav; k++) {
+        u32 l = (u32)strlen(av[k]) + 1;
+        sp -= l;
+        for (u32 i = 0; i < l; i++) uwrite8(segtab, sp + i, (u8)av[k][i]);
+        sptr[ns++] = sp;
+    }
+    for (unsigned k = 0; k < nev; k++) {
+        u32 l = (u32)strlen(ev[k]) + 1;
+        sp -= l;
+        for (u32 i = 0; i < l; i++) uwrite8(segtab, sp + i, (u8)ev[k][i]);
+        sptr[ns++] = sp;
+    }
+    u32 nwords = 1 + nav + 1 + nev + 1;
+    sp = (sp - nwords * 4) & ~7u;
+    u32 w = sp;
+    uwrite32(segtab, w, nav); w += 4;
+    for (unsigned k = 0; k < nav; k++)  { uwrite32(segtab, w, sptr[k]); w += 4; }
+    uwrite32(segtab, w, 0); w += 4;
+    for (unsigned k = 0; k < nev; k++)  { uwrite32(segtab, w, sptr[nav + k]); w += 4; }
+    uwrite32(segtab, w, 0);
 
     *entry = a.entry; *sp_out = sp;
-    printf("[utest] loaded %s: text=%u data=%u@%08x bss=%u entry=%08x sp=%08x\n",
-           path, a.text, a.data, dv, a.bss, a.entry, sp);
+    printf("[uproc] loaded %s: text=%u data=%u@%08x bss=%u entry=%08x sp=%08x argc=%u\n",
+           path, a.text, a.data, dv, a.bss, a.entry, sp, nav);
+    return 0;
+}
+
+static int load_user_prog(const char *path, u32 segtab, u32 *entry, u32 *sp_out)
+{
+    if (!nuargv) uargv[nuargv++] = path;         /* argv[0] defaults to the path */
+    return load_user_prog_av(path, segtab, entry, sp_out,
+                             uargv, nuargv, uenvp, nuenvp);
+}
+
+/* ------------------------------------------------------- process management
+   nX's own fork/exec/exit operate on Mach proc + thread structures that our
+   synthetic proc1 only approximates; exit() alone walks the parent pointer, the
+   run queues and the pmap, and spins forever on a lock the moment one of them
+   is not what it expects.  Building all of that faithfully is a project in
+   itself, and it is not what makes the install tape interesting.
+
+   So process *lifetime* is modelled in the emulator -- fork, execve, wait and
+   exit -- while everything that touches the machine or the filesystem
+   (open/read/lseek/stat/ioctl on the real UFS root) still goes to the real
+   kernel.  This is the same division of labour the buffer cache and the console
+   already use, and it is what lets /bin/sh run a script.
+
+   Processes run one at a time and switch only at a syscall boundary in user
+   mode, so no kernel state is ever in flight across a switch: the whole context
+   is the 32 GPRs, the PC, and the address space. */
+#define MAX_UPROC 32
+typedef struct {
+    int used, zombie, waiting, status;
+    int pid, ppid;
+    u32 wait_statusp;                 /* wait4's status pointer, if blocked */
+    u32 segtab, pc, r[32];
+} UProc;
+static UProc uprocs[MAX_UPROC];
+static int   ucur = -1, next_pid = 2, uproc_on;
+static const char *guest_root = "..";        /* extracted tape = the guest's / */
+
+/* Map a guest path onto the extracted tape directory that mirrors the root
+   filesystem the kernel is reading blocks from. */
+static const char *guest_path(const char *p)
+{
+    static char buf[1024];
+    snprintf(buf, sizeof buf, "%s%s%s", guest_root,
+             (*p == '/') ? "" : "/", p);
+    return buf;
+}
+
+static int uread_str(u32 va, char *buf, size_t n)
+{
+    size_t i = 0;
+    for (; i + 1 < n; i++) {
+        buf[i] = (char)mem_r8(translate(va + (u32)i, 0));
+        if (!buf[i]) return (int)i;
+    }
+    buf[i] = 0;
+    return (int)i;
+}
+
+/* Deep-copy an address space: every valid segment, every valid page. */
+static u32 aspace_clone(u32 src)
+{
+    u32 dst = upool_alloc();
+    for (u32 s = 0; s < 1024; s++) {
+        u32 sd = mem_r32(src + s * 4);
+        if (!(sd & 1)) continue;
+        u32 spt = sd & 0xFFFFF000u, dpt = upool_alloc();
+        mem_w32(dst + s * 4, dpt | 1);
+        for (u32 p = 0; p < 1024; p++) {
+            u32 pe = mem_r32(spt + p * 4);
+            if (!(pe & 1)) continue;
+            u32 pg = upool_alloc(), sp = pe & 0xFFFFF000u;
+            for (u32 i = 0; i < PAGE_SIZE; i += 4) mem_w32(pg + i, mem_r32(sp + i));
+            mem_w32(dpt + p * 4, pg | 1);
+        }
+    }
+    return dst;
+}
+
+static void uproc_activate(u32 segtab)
+{
+    usegtab_cur = segtab;
+    /* Both APRs: pmap_activate sets user and supervisor alike, so the kernel's
+       copyin/copyout of syscall arguments reaches the user program.  Kernel
+       addresses bypass the APR entirely under realmm, so this is safe. */
+    mem_w32(0xFFF7E000u + CMMU_UAPR, segtab | 1);
+    mem_w32(0xFFF7F000u + CMMU_UAPR, segtab | 1);
+    mem_w32(0xFFF7E000u + CMMU_SAPR, segtab | 1);
+    mem_w32(0xFFF7F000u + CMMU_SAPR, segtab | 1);
+    tlb_flush();
+}
+
+static void uctx_save(u32 pc)
+{
+    if (ucur < 0) return;
+    UProc *u = &uprocs[ucur];
+    u->pc = pc;
+    for (int i = 0; i < 32; i++) u->r[i] = RD(i);
+}
+
+static void uctx_load(int i)
+{
+    UProc *u = &uprocs[i];
+    ucur = i;
+    for (int k = 1; k < 32; k++) WR(k, u->r[k]);
+    cpu.pc = u->pc;
+    cpu.cr[1] = 0;                                  /* user mode */
+    uproc_activate(u->segtab);
+}
+
+static int uproc_new(int ppid, u32 segtab)
+{
+    for (int i = 0; i < MAX_UPROC; i++)
+        if (!uprocs[i].used) {
+            memset(&uprocs[i], 0, sizeof uprocs[i]);
+            uprocs[i].used = 1;
+            uprocs[i].pid = next_pid++;
+            uprocs[i].ppid = ppid;
+            uprocs[i].segtab = segtab;
+            return i;
+        }
+    return -1;
+}
+
+static int uproc_runnable(void)
+{
+    for (int i = 0; i < MAX_UPROC; i++)
+        if (uprocs[i].used && !uprocs[i].zombie && !uprocs[i].waiting) return i;
+    return -1;
+}
+
+static int uproc_find_pid(int pid)
+{
+    for (int i = 0; i < MAX_UPROC; i++)
+        if (uprocs[i].used && uprocs[i].pid == pid) return i;
+    return -1;
+}
+
+static int uproc_all_done;      /* set when the last process has exited */
+
+/* Service the process-lifetime syscalls.  Returns 1 if handled; the pc is left
+   at tpc+8 (success) or tpc+4 (error) exactly as the kernel's return path
+   would leave it. */
+static int uproc_syscall(u32 sysno, u32 tpc)
+{
+    if (!uproc_on || ucur < 0) return 0;
+    UProc *me = &uprocs[ucur];
+    u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
+
+    switch (sysno) {
+    case 20: WR(2, me->pid);  cpu.pc = tpc + 8; return 1;   /* getpid  */
+    case 39: WR(2, me->ppid); cpu.pc = tpc + 8; return 1;   /* getppid */
+
+    case 2: case 66: {                                      /* fork/vfork */
+        u32 child_as = aspace_clone(me->segtab);
+        int ci = uproc_new(me->pid, child_as);
+        if (ci < 0) { WR(2, 12); cpu.pc = tpc + 4; return 1; }   /* ENOMEM */
+        UProc *c = &uprocs[ci];
+        for (int i = 0; i < 32; i++) c->r[i] = RD(i);
+        /* Two-value return.  libc's fork wrapper is `bcnd eq0, r3, keep-r2`
+           followed by `r2 = 0` -- so r3 == 0 means "you are the parent, r2 is
+           the child's pid" and r3 != 0 means "you are the child".  Leaving r3
+           at whatever the caller had makes BOTH sides run the child's path. */
+        c->r[2] = (u32)me->pid;
+        c->r[3] = 1;                                        /* child  */
+        c->pc = tpc + 8;
+        printf("[uproc] pid %d forked -> pid %d (aspace %08x)\n",
+               me->pid, c->pid, child_as);
+        WR(2, (u32)c->pid);
+        WR(3, 0);                                           /* parent */
+        cpu.pc = tpc + 8;
+        return 1;
+    }
+
+    case 59: {                                              /* execve */
+        char path[512];
+        uread_str(a0, path, sizeof path);
+        const char *av[MAX_UARGV], *ev[MAX_UENVP];
+        static char strbuf[MAX_UARGV + MAX_UENVP][256];
+        unsigned nav = 0, nev = 0;
+        for (u32 p = a1; a1 && nav < MAX_UARGV; p += 4) {
+            u32 sp = mem_r32(translate(p, 0));
+            if (!sp) break;
+            uread_str(sp, strbuf[nav], sizeof strbuf[0]);
+            av[nav] = strbuf[nav]; nav++;
+        }
+        for (u32 p = a2; a2 && nev < MAX_UENVP; p += 4) {
+            u32 sp = mem_r32(translate(p, 0));
+            if (!sp) break;
+            uread_str(sp, strbuf[MAX_UARGV + nev], sizeof strbuf[0]);
+            ev[nev] = strbuf[MAX_UARGV + nev]; nev++;
+        }
+        if (!nav) { av[0] = path; nav = 1; }
+
+        u32 fresh = upool_alloc(), entry, sp;
+        u32 save = usegtab_cur;
+        usegtab_cur = 0;              /* no demand paging while we build it */
+        int rc = load_user_prog_av(guest_path(path), fresh, &entry, &sp,
+                                   av, nav, ev, nev);
+        usegtab_cur = save;
+        if (rc) {
+            printf("[uproc] pid %d execve(\"%s\") -> ENOENT\n", me->pid, path);
+            WR(2, 2); cpu.pc = tpc + 4; return 1;           /* ENOENT */
+        }
+        printf("[uproc] pid %d execve(\"%s\") argc=%u\n", me->pid, path, nav);
+        me->segtab = fresh;
+        for (int i = 1; i < 32; i++) WR(i, 0);
+        WR(31, sp);
+        cpu.pc = entry;
+        uproc_activate(fresh);
+        return 1;
+    }
+
+    case 1: {                                               /* exit(status) */
+        me->zombie = 1;
+        me->status = (int)((a0 & 0xff) << 8);
+        printf("[uproc] pid %d exited(%u)\n", me->pid, a0 & 0xff);
+        int pi = uproc_find_pid(me->ppid);
+        if (pi >= 0 && uprocs[pi].waiting) {                /* wake the parent */
+            uprocs[pi].waiting = 0;
+            uprocs[pi].r[2] = (u32)me->pid;
+            uprocs[pi].r[3] = (u32)me->status;
+            if (uprocs[pi].wait_statusp)
+                uwrite32(uprocs[pi].segtab, uprocs[pi].wait_statusp, (u32)me->status);
+            me->used = 0;                                   /* reaped */
+            uctx_load(pi);
+            return 1;
+        }
+        int n = uproc_runnable();
+        if (n < 0) { uproc_all_done = 1; return 1; }
+        uctx_load(n);
+        return 1;
+    }
+
+    case 7: case 84: {                                      /* wait / wait4 */
+        for (int i = 0; i < MAX_UPROC; i++)
+            if (uprocs[i].used && uprocs[i].zombie && uprocs[i].ppid == me->pid) {
+                int pid = uprocs[i].pid, st = uprocs[i].status;
+                uprocs[i].used = 0;
+                WR(2, (u32)pid); WR(3, (u32)st);
+                if (sysno == 84 && a1) uwrite32(me->segtab, a1, (u32)st);
+                cpu.pc = tpc + 8;
+                return 1;
+            }
+        int kids = 0;
+        for (int i = 0; i < MAX_UPROC; i++)
+            if (uprocs[i].used && uprocs[i].ppid == me->pid) kids++;
+        if (!kids) { WR(2, 10); cpu.pc = tpc + 4; return 1; }   /* ECHILD */
+        uctx_save(tpc + 8);                                 /* block, run a child */
+        me->waiting = 1;
+        me->wait_statusp = (sysno == 84) ? a1 : 0;
+        int n = uproc_runnable();
+        if (n < 0) { uproc_all_done = 1; return 1; }
+        uctx_load(n);
+        return 1;
+    }
+    }
     return 0;
 }
 
@@ -1728,8 +2106,15 @@ static void launch_utest(void)
         fprintf(stderr, "[utest] could not load %s\n", uprog_path);
         uprog_path = NULL;
     }
-    mem_w32(0xFFF7E000u + CMMU_UAPR, segtab | 1);   /* data UAPR */
-    mem_w32(0xFFF7F000u + CMMU_UAPR, segtab | 1);   /* code UAPR */
+    uproc_activate(segtab);                         /* APRs + demand paging */
+    /* Register it as pid 1 of the emulator-managed process table, so its
+       fork/exec/wait/exit are serviced (see the process-management notes). */
+    {
+        uproc_on = 1;
+        int i = uproc_new(0, segtab);
+        uprocs[i].pid = 1; next_pid = 2;
+        ucur = i;
+    }
     /* A trap from user mode switches the kernel to the stack in SR1(cr17):
        fpipe does `ld r31,cr17`.  We must point it at a valid kernel stack or
        the register save (and thus the read-back syscall number) lands in
@@ -1866,6 +2251,14 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             }
             break;
         }
+        /* _simple_lock_failed: report who spun on what, once. */
+        if (cpu.pc == 0xC0018170u) {
+            static int once;
+            if (!once++)
+                printf("[lockspin] simple_lock(%08x) failed; r1=%08x r26=%08x "
+                       "r25=%08x r27=%08x @%llu\n", RD(2), RD(1), RD(26),
+                       RD(25), RD(27), (unsigned long long)cpu.count);
+        }
         if (trace_pc_until && cpu.count < trace_pc_until)
             printf("[pctrace] %08x\n", cpu.pc);
         last_kpc = cpu.pc;
@@ -1927,6 +2320,11 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                 }
             }
         }
+        if (fd_watch_pc && cpu.pc == fd_watch_pc + 8u
+            && !(cpu.cr[1] & 0x80000000u)) {
+            if (RD(2) < 64) fd_kernel[RD(2)] = 1;      /* kernel owns this fd */
+            fd_watch_pc = 0;
+        }
         if (step()) {
             /* Faithful userland: deliver real synchronous traps (syscalls via
                vector 128, page faults via vector 2, etc.) to the kernel's own
@@ -1938,11 +2336,40 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             if (deliver_traps && trap_vector != (u32)-1
                 && cpu.cr[7] >= 0xC0000000u) {
                 if (trace_traps)
-                    printf("[trap] vec %u pc=%08x  syscall r9=%-4u args %08x %08x %08x @%llu\n",
+                    printf("[trap] pid %d vec %u pc=%08x  syscall r9=%-4u "
+                           "args %08x %08x %08x @%llu\n",
+                           ucur >= 0 ? uprocs[ucur].pid : 0,
                            trap_vector, trap_pc, RD(9), RD(2), RD(3), RD(4),
                            (unsigned long long)cpu.count);
+                /* stdin/stdout/stderr never reach the kernel (see the console
+                   notes above); everything else goes to the real handlers. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && console_syscall(RD(9), trap_pc)) {
+                    trap_taken = 0;
+                    continue;
+                }
+                /* fork/execve/wait/exit are serviced here too; see the
+                   process-management notes above. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && uproc_syscall(RD(9), trap_pc)) {
+                    trap_taken = 0;
+                    if (uproc_all_done) {
+                        printf("[uproc] all processes exited @%llu\n",
+                               (unsigned long long)cpu.count);
+                        break;
+                    }
+                    continue;
+                }
+                /* Remember fd-returning syscalls so their result can be marked
+                   kernel-owned when control comes back to user mode. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && (RD(9) == 5 || RD(9) == 8 || RD(9) == 41 || RD(9) == 90))
+                    fd_watch_pc = trap_pc;
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
+                    && RD(2) < 64)
+                    fd_kernel[RD(2)] = 0;              /* close() releases it */
                 deliver_trap(trap_vector, trap_pc);
-                if (trace_traps) trace_pc_until = cpu.count + 400;
+                if (trace_traps) trace_pc_until = cpu.count + trace_len;
                 trap_taken = 0;
                 continue;
             }
@@ -2048,10 +2475,16 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "--pchist")) dump_pchist = 1;
+        else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);
         else if (!strcmp(argv[i], "--uland")) uland_probe = 1;
         else if (!strcmp(argv[i], "--deliver-traps")) deliver_traps = 1;
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--utest")) { utest = 1; deliver_traps = 1; trace_traps = 1; }
+        else if (!strcmp(argv[i], "--no-console")) console_io = 0;
+        else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV)
+            uargv[nuargv++] = argv[i] + 7;
+        else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP)
+            uenvp[nuenvp++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--utrap=", 8)) utrap_vec = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--uprog=", 8)) { uprog_path = argv[i]+8; utest = 1; deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--mapper=", 9)) seed_mapper = (u32)strtoul(argv[i]+9,0,0);
@@ -2088,7 +2521,17 @@ int main(int argc, char **argv)
            If --root wasn't given, derive it from the vmunix path: vmunix lives
            at <tapedir>/vmunix and the tape image is its sibling <tapedir>.img
            (e.g. .../tapeimage/vmunix -> .../tapeimage.img). */
-        static char derived[1024];
+        static char derived[1024], gr[1024];
+        {   /* the extracted tape directory doubles as the guest's / for exec */
+            size_t n = strlen(path);
+            const char *b = path + n;
+            while (b > path && b[-1] != '/' && b[-1] != '\\') b--;
+            size_t dlen = (size_t)(b - path);
+            if (dlen > 1 && dlen < sizeof gr) {
+                memcpy(gr, path, dlen - 1); gr[dlen - 1] = 0;
+                guest_root = gr;
+            }
+        }
         if (!strcmp(root_img_path, "../tapeimage.img")) {
             size_t n = strlen(path);
             const char *base = path + n;
