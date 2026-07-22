@@ -32,6 +32,34 @@ Defaults: the **real-memory model** (`--realmm`) with translation and EEPROM sig
 `--scsitrace`, `--clock`, `--pcsample=N`, `--pchist` (dump the last 64K PCs at halt —
 the tool that cracked several blockers), `--watch=PC`, `--root=PATH`, `--nodes=N`.
 
+### An interactive shell
+
+```sh
+./nx88.exe sys <path-to>/tapeimage/vmunix --shell
+```
+
+boots the kernel and hands your terminal to `/bin/sh` off the 1989 tape:
+
+```
+=== nX on the TC2000 -- /bin/sh from the 1989 install tape ===
+The root filesystem is the tape's own UFS.  ^D or `exit' quits.
+
+# pwd
+/
+# cat /etc/passwd
+root::0:10::/:/bin/sh
+# ls -l /etc/passwd
+-rw-rw-r--  1 root                 22 Nov 28 19:06 /etc/passwd
+# date
+Tue Nov 28 19:07:37 EST 1989
+```
+
+`cd`, `ls`, `cat`, `grep`, `df`, pipelines, `$?` and shell variables all work.
+The filesystem is genuinely the tape's UFS, read block by block through the
+kernel's own code — so only what shipped on the installer is there (`wc` and
+`who`, for instance, are not). It is read-only in effect: writes go into the
+buffer cache and no further, because no disk is modelled yet.
+
 A clean default run ends with:
 
 ```

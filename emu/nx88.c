@@ -471,6 +471,7 @@ static u32  watch_pc;
 static int  dump_pchist;
 static int  dump_uarea;
 static int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
+static int  interactive;      /* --shell: hand the terminal to /bin/sh */
 static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
@@ -1148,10 +1149,11 @@ static int step(void)
         u32 cuapr = mem_r32(0xFFF7F000u + CMMU_UAPR);
         u32 duapr = mem_r32(0xFFF7E000u + CMMU_UAPR);
         u32 pa1000 = 0; (void)mmu_walk(cuapr, 0x1000u, &pa1000);
-        printf("[ldctx-rte] PSR=%08x EPSR=%08x SXIP=%08x SNIP=%08x SFIP=%08x\n"
-               "            codeUAPR=%08x dataUAPR=%08x  user0x1000 -> pa=%08x word=%08x\n",
-               cpu.cr[1], cpu.cr[2], cpu.cr[4], cpu.cr[5], cpu.cr[6],
-               cuapr, duapr, pa1000, pa1000 ? mem_r32(pa1000) : 0);
+        if (!quiet_uproc)
+            printf("[ldctx-rte] PSR=%08x EPSR=%08x SXIP=%08x SNIP=%08x SFIP=%08x\n"
+                   "            codeUAPR=%08x dataUAPR=%08x  user0x1000 -> pa=%08x word=%08x\n",
+                   cpu.cr[1], cpu.cr[2], cpu.cr[4], cpu.cr[5], cpu.cr[6],
+                   cuapr, duapr, pa1000, pa1000 ? mem_r32(pa1000) : 0);
     }
 
     /* Deliver a periodic hardclock interrupt once the kernel has enabled
@@ -1397,7 +1399,9 @@ static u32 be32(const u8 *p)
 static int aout_load(const char *path, AOut *a)
 {
     FILE *f = fopen(path, "rb");
-    if (!f) { perror(path); return -1; }
+    /* A miss is routine once a shell is running -- it is just PATH being
+       searched -- so let the caller report it in the guest's own terms. */
+    if (!f) { if (!quiet_uproc) perror(path); return -1; }
     fseek(f, 0, SEEK_END); a->size = ftell(f); fseek(f, 0, SEEK_SET);
     a->img = malloc(a->size);
     if (fread(a->img, 1, a->size, f) != (size_t)a->size) { fclose(f); return -1; }
@@ -2213,7 +2217,7 @@ static u32 create_proc1(u32 user_pc, u32 user_sp, u32 usegtab)
            non-zero -- making trap() bail before it ever dispatches the syscall. */
         for (u32 i = 0; i < 0x2000u; i += 4) mem_w32(U + i, 0);
         mem_w32(translate(C + 0x98, 0), U);
-        printf("[utest]   proc1 u-area %08x (zeroed; proc0's was %08x)\n", U, u0);
+        if (!quiet_uproc) printf("[utest]   proc1 u-area %08x (zeroed; proc0's was %08x)\n", U, u0);
     }
 
     /* splice onto the head of the run queue so swtch_pri selects proc1 */
@@ -2224,9 +2228,9 @@ static u32 create_proc1(u32 user_pc, u32 user_sp, u32 usegtab)
     if (first >= 0xC0000000u) mem_w32(translate(first + 4, 0), P);
     mem_w32(translate(rq, 0), P);
 
-    printf("[utest] proc1=%08x ctx=%08x (cloned from proc0=%08x/%08x), "
+    if (!quiet_uproc) printf("[utest] proc1=%08x ctx=%08x (cloned from proc0=%08x/%08x), "
            "queued at runq head\n", P, C, cp, cctx);
-    printf("[utest]   ctx +7c(sp)=%08x +80(pc)=%08x +8c(epsr)=%08x\n"
+    if (!quiet_uproc) printf("[utest]   ctx +7c(sp)=%08x +80(pc)=%08x +8c(epsr)=%08x\n"
            "[utest]   ctx +98(uarea)=%08x +a0(pmap)=%08x +a4(aspace)=%08x +dc=%08x\n",
            mem_r32(translate(C + 0x7c, 0)), mem_r32(translate(C + 0x80, 0)),
            mem_r32(translate(C + 0x8c, 0)),
@@ -2318,7 +2322,7 @@ static void launch_utest(void)
         mem_w16(translate(thr + 0x78, 0), (u16)node);
         mem_w32(translate(thr + 0x14, 0), mem_r32(translate(head, 0)));
         mem_w32(translate(head, 0), thr);
-        printf("[utest] added thread %08x to curproclist[%u]\n", thr, node);
+        if (!quiet_uproc) printf("[utest] added thread %08x to curproclist[%u]\n", thr, node);
     }
     /* Create proc1: a real scheduler-selectable process that resumes in user
        mode at the same program.  When the syscall's trap-return reschedule
@@ -2330,7 +2334,10 @@ static void launch_utest(void)
     WR(31, usp);                                    /* user stack pointer */
     cpu.pc = uva;
     cpu.cr[1] = 0u;                                 /* user mode, interrupts on */
-    printf("[utest] user @VA %08x segtab=%08x kstack(cr17)=%08x; dropping to "
+    if (interactive)
+        printf("\n=== nX on the TC2000 -- /bin/sh from the 1989 install tape ===\n"
+               "The root filesystem is the tape's own UFS.  ^D or `exit' quits.\n\n");
+    if (!quiet_uproc) printf("[utest] user @VA %08x segtab=%08x kstack(cr17)=%08x; dropping to "
            "user mode\n", uva, segtab, cpu.cr[17]);
 }
 
@@ -2569,8 +2576,11 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                     && uproc_syscall(RD(9), trap_pc)) {
                     trap_taken = 0;
                     if (uproc_all_done) {
-                        printf("[uproc] all processes exited @%llu\n",
-                               (unsigned long long)cpu.count);
+                        if (interactive)
+                            printf("\n[nx] shell exited -- machine halted.\n");
+                        else
+                            printf("[uproc] all processes exited @%llu\n",
+                                   (unsigned long long)cpu.count);
                         break;
                     }
                     continue;
@@ -2609,11 +2619,12 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             break;
         }
     }
-    for (int k = 0; k < 32; k += 4) {
-        printf("  ");
-        for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
-        putchar('\n');
-    }
+    if (!quiet_uproc)
+        for (int k = 0; k < 32; k += 4) {
+            printf("  ");
+            for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
+            putchar('\n');
+        }
     /*
      * Locate the kernel's real page tables.  It built them while translation
      * was effectively identity, so they are physically wherever it wrote
@@ -2654,13 +2665,15 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             putchar('\n');
         }
     }
-    printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);
-    if (translate_on)
-        printf("translation: %llu faults (last va %08x from pc %08x)\n",
-               (unsigned long long)xlat_faults, last_fault_va, last_fault_pc);
-    printf("cmmu probes: %llu hit, %llu miss\n",
-           (unsigned long long)probe_hits, (unsigned long long)probe_misses);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
+    if (!quiet_uproc) {
+        printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);
+        if (translate_on)
+            printf("translation: %llu faults (last va %08x from pc %08x)\n",
+                   (unsigned long long)xlat_faults, last_fault_va, last_fault_pc);
+        printf("cmmu probes: %llu hit, %llu miss\n",
+               (unsigned long long)probe_hits, (unsigned long long)probe_misses);
+    }
     printf("stopped at pc=%08x after %llu instructions (%.2fs, %.1f Minsn/s)\n",
            cpu.pc, (unsigned long long)cpu.count, secs,
            secs > 0 ? cpu.count / secs / 1e6 : 0.0);
@@ -2714,6 +2727,14 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--utest")) { utest = 1; deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--no-console")) console_io = 0;
         else if (!strcmp(argv[i], "--quiet")) trace_traps = 0, quiet_uproc = 1;
+        /* --shell: boot, then hand the terminal to /bin/sh off the tape.  Just
+           the convenience settings -- the program, a login-ish environment,
+           quiet output, and a budget big enough to sit at a prompt. */
+        else if (!strcmp(argv[i], "--shell")) {
+            interactive = 1; utest = 1; deliver_traps = 1;
+            trace_traps = 0; quiet_uproc = 1;
+            limit = ~0ull;
+        }
         else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV)
             uargv[nuargv++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP)
@@ -2763,6 +2784,19 @@ int main(int argc, char **argv)
             if (dlen > 1 && dlen < sizeof gr) {
                 memcpy(gr, path, dlen - 1); gr[dlen - 1] = 0;
                 guest_root = gr;
+            }
+        }
+        /* --shell: everything else follows from the tape directory. */
+        if (interactive && !uprog_path) {
+            static char shpath[1024];
+            snprintf(shpath, sizeof shpath, "%s/bin/sh", guest_root);
+            uprog_path = shpath;
+            if (!nuargv) uargv[nuargv++] = "sh";
+            if (!nuenvp) {
+                uenvp[nuenvp++] = "PATH=/bin:/etc:/usr/bin";
+                uenvp[nuenvp++] = "HOME=/";
+                uenvp[nuenvp++] = "TERM=dumb";
+                uenvp[nuenvp++] = "SHELL=/bin/sh";
             }
         }
         if (!strcmp(root_img_path, "../tapeimage.img")) {
