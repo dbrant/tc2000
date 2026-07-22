@@ -335,6 +335,9 @@ static int  log_msgs;
 #define LOG_ROUTINE     0xC005A85Cu
 #define PRINTF_THROTTLE 0xC005A9D0u
 #define KERN_PUTCHAR    0xC005B218u   /* subr_prf.o putchar(c, ...) */
+#define SDSTRATEGY      0xC00BAFE4u   /* sd.o strategy(bp)          */
+#define BIODONE         0xC0074138u   /* bio.o biodone(bp)          */
+#define GETBLK_WAIT     0xC007350Cu   /* return addr of getblk's sleep-on-busy */
 
 /*
  * MC88200 CMMU ID registers.
@@ -476,6 +479,7 @@ static int  interactive;      /* --shell: hand the terminal to /bin/sh */
 static int  kmsgs;            /* --kmsg: echo the kernel's console output */
 static int  brk_passthru;     /* --brk-passthru: let obreak reach the kernel */
 static u32  brk_watch_pc, brk_watch_arg;
+static u32  last_sleep_chan, last_sleep_from;
 static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
@@ -1047,6 +1051,53 @@ static int step(void)
         cpu.pc = RD(1);            /* return to the SHA caller            */
         WR(2, 0);                  /* tsleep result 0 = woken / success   */
         return 0;
+    }
+
+    /* Disk strategy.  Satisfying I/O at the biowait below covers only the
+       SYNCHRONOUS case, and the buffer cache does not read that way for long:
+       a sequential read issues a B_ASYNC read-ahead, whose completion is
+       supposed to arrive as an interrupt running biodone -- which, for an async
+       buffer, is also what calls brelse and puts it back.  With no interrupt,
+       each read-ahead buffer stayed B_BUSY forever, and after a handful getblk
+       found one busy and slept: `cat' died on any file over about three blocks.
+
+       So complete the transfer here, at the driver's front door, and then jump
+       into the kernel's own _biodone with the buffer -- letting it do the real
+       bookkeeping, wakeup and brelse, for sync and async alike. */
+    if (biowait_sync && sysmode
+        && ((pc == SDSTRATEGY) || (pc == TSLEEP_ENTRY && RD(1) == GETBLK_WAIT))) {
+        u32 buf = RD(2);
+        if (buf >= 0xC0000000u) {
+            u32 flags  = mem_r32(translate(buf + 0x00, 0));
+            u32 bcount = mem_r32(translate(buf + 0x14, 0));
+            u32 addr   = mem_r32(translate(buf + 0x3c, 0));
+            u32 blkno  = mem_r32(translate(buf + 0x40, 0));
+            if (root_img && (flags & 1u) && addr >= 0xC0000000u
+                && bcount && bcount <= 0x10000u) {
+                u8 tmp[0x10000];
+                if (fseek(root_img, (long)blkno * 512, SEEK_SET) == 0) {
+                    size_t got = fread(tmp, 1, bcount, root_img);
+                    for (size_t k = got; k < bcount; k++) tmp[k] = 0;
+                    for (u32 k = 0; k < bcount; k += 4)
+                        mem_w32(translate(addr + k, 0), be32(tmp + k));
+                }
+            }
+            if (scsi_trace)
+                printf("[%s] buf=%08x flags=%08x blk=%u bcount=%u addr=%08x @%llu\n",
+                       pc == SDSTRATEGY ? "strategy" : "getblk-stuck",
+                       buf, flags, blkno, bcount, addr,
+                       (unsigned long long)cpu.count);
+            if (pc != SDSTRATEGY) {
+                /* Standing in for the completion interrupt getblk is waiting
+                   for: release the lock the sleep would have dropped, and
+                   arrange for biodone to return where the sleep would have. */
+                if (RD(4) >= 0xC0000000u && RD(4) < 0xE0000000u)
+                    mem_w32(translate(RD(4), 0), 0);
+                WR(1, GETBLK_WAIT);
+            }
+            cpu.pc = BIODONE;          /* biodone(bp) -- r2 is already the bp */
+            return 0;
+        }
     }
 
     /* biowait completion.  The buffer-cache wait loop in _brelvp (c0074098)
@@ -2535,6 +2586,12 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             }
             break;
         }
+        /* Remember the last thing the kernel tried to sleep on; the panic
+           report below is far more useful with the channel in hand. */
+        if (cpu.pc == 0xC0054A64u) {
+            last_sleep_chan = RD(2);
+            last_sleep_from = RD(1);
+        }
         /* _panic: the message is the single most useful thing the kernel can
            tell us, and it is lost if we only catch the throttled printf. */
         if (cpu.pc == 0xC005AFE0u) {
@@ -2542,6 +2599,8 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             mem_cstr(RD(2), m, sizeof m);
             printf("[PANIC] %s  (from %08x, @%llu)\n", m, RD(1),
                    (unsigned long long)cpu.count);
+            printf("[PANIC] last sleep: chan=%08x from=%08x\n",
+                   last_sleep_chan, last_sleep_from);
             if (dump_pchist) {
                 printf("--- last %d PCs before the panic ---\n", PCH_N);
                 for (unsigned k = 0; k < PCH_N; k++)
