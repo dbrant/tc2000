@@ -470,6 +470,7 @@ static u32  findpt_va;
 static u32  watch_pc;
 static int  dump_pchist;
 static int  dump_uarea;
+static int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
@@ -1600,7 +1601,7 @@ static u32 udemand_page(u32 apr, u32 va)
     umap(usegtab_cur, va, pg);
     tlb_flush();
     if (++udemand_count <= 32)
-        printf("[upage] demand-mapped va %08x -> pa %08x (pc=%08x)\n",
+        if (!quiet_uproc) printf("[upage] demand-mapped va %08x -> pa %08x (pc=%08x)\n",
                va & ~0xFFFu, pg, cpu.pc);
     return pg;
 }
@@ -1621,7 +1622,7 @@ static u32 udemand_page(u32 apr, u32 va)
    console. */
 static int  console_io = 1;                 /* --no-console disables      */
 static u8   fd_kernel[64];                  /* fd allocated by the kernel */
-static u8   fd_console[3] = { 1, 1, 1 };    /* 0-2 still wired to the host */
+static u8   fd_console[64] = { 1, 1, 1 };   /* which fds still reach the host */
 /* The bootstrap stub (see launch_utest) lives here and ends with this private
    syscall number, which the process manager turns into the first exec. */
 #define UAREA_VA   0xFBFFE000u          /* _u: the per-process kernel state */
@@ -1630,11 +1631,51 @@ static u8   fd_console[3] = { 1, 1, 1 };    /* 0-2 still wired to the host */
 #define UBOOT_DONE 0x3F0u
 static u32  fd_watch_pc;                    /* trap pc of an fd-returning syscall */
 static int  fd_watch_pair;                  /* ...and it was pipe(2), returning two */
+static int  fd_watch_con;                   /* ...and the source was the console    */
+static u8   fd_watch_pipe;                  /* ...or a pipe                         */
 static u32  con_out_bytes, con_in_bytes;
+
+/* ------------------------------------------------------------------- pipes
+   A pipe is the one thing a shell script blocks on, and blocking is exactly
+   what we cannot do: the kernel would try to sleep on behalf of what it still
+   believes is the idle process, and panic.  So pipes are serviced here as
+   well.  The kernel's own pipe(2) still runs -- that is what reserves the two
+   descriptor numbers and makes dup2 and close behave -- but the bytes flow
+   through a buffer of ours.
+
+   The buffer is unbounded, so a writer never blocks, and a read of an empty
+   pipe is end-of-file rather than a wait.  That is the right answer here
+   precisely because processes run one at a time and a child runs before its
+   parent: by the time anyone reads, everyone who could have written has. */
+#define MAX_PIPES 32
+typedef struct { int used; u8 *buf; size_t len, cap, rpos; } Pipe;
+static Pipe pipes[MAX_PIPES];
+static u8   fd_pipe[64];                    /* fd -> pipe index + 1 */
+
+static int pipe_alloc(void)
+{
+    for (int i = 0; i < MAX_PIPES; i++)
+        if (!pipes[i].used) {
+            pipes[i].used = 1; pipes[i].len = pipes[i].rpos = 0;
+            if (!pipes[i].buf) { pipes[i].cap = 65536; pipes[i].buf = malloc(pipes[i].cap); }
+            return i;
+        }
+    return -1;
+}
+
+static void pipe_write(Pipe *p, const u8 *src, u32 n)
+{
+    if (p->len + n > p->cap) {
+        while (p->len + n > p->cap) p->cap *= 2;
+        p->buf = realloc(p->buf, p->cap);
+    }
+    memcpy(p->buf + p->len, src, n);
+    p->len += n;
+}
 
 static int fd_is_console(u32 fd)
 {
-    return console_io && fd < 3 && fd_console[fd];
+    return console_io && fd < 64 && fd_console[fd];
 }
 
 /* Service a syscall entirely in the emulator.  Returns 1 if handled, and
@@ -1643,6 +1684,27 @@ static int console_syscall(u32 sysno, u32 tpc)
 {
     u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
     long ret;
+    /* Pipe traffic first: these descriptors are real kernel descriptors, but
+       the bytes are ours (see the pipe notes above). */
+    if ((sysno == 3 || sysno == 4) && a0 < 64 && fd_pipe[a0]) {
+        Pipe *p = &pipes[fd_pipe[a0] - 1];
+        if (sysno == 4) {
+            u8 *tmp = malloc(a2 ? a2 : 1);
+            for (u32 i = 0; i < a2; i++) tmp[i] = mem_r8(translate(a1 + i, 0));
+            pipe_write(p, tmp, a2);
+            free(tmp);
+            ret = (long)a2;
+        } else {
+            u32 avail = (u32)(p->len - p->rpos), n = a2 < avail ? a2 : avail;
+            for (u32 i = 0; i < n; i++)
+                mem_w8(translate(a1 + i, 0), p->buf[p->rpos + i]);
+            p->rpos += n;
+            ret = (long)n;                             /* 0 == end of file */
+        }
+        WR(2, (u32)ret);
+        cpu.pc = tpc + 8;
+        return 1;
+    }
     switch (sysno) {
     case 4:                                            /* write(fd, buf, n) */
         if (!fd_is_console(a0)) return 0;
@@ -1667,11 +1729,7 @@ static int console_syscall(u32 sysno, u32 tpc)
         ret = (long)got;
         break;
     }
-    case 6:                                            /* close(fd)         */
-        if (!fd_is_console(a0)) return 0;
-        ret = 0;
-        break;
-    case 54:                                           /* ioctl(fd, ...)    */
+    case 54:                                         /* ioctl(fd, ...)    */
         if (!fd_is_console(a0)) return 0;
         ret = 0;                                       /* yes, it's a tty   */
         break;
@@ -1755,7 +1813,7 @@ static int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_o
     uwrite32(segtab, w, 0);
 
     *entry = a.entry; *sp_out = sp;
-    printf("[uproc] loaded %s: text=%u data=%u@%08x bss=%u entry=%08x sp=%08x argc=%u\n",
+    if (!quiet_uproc) printf("[uproc] loaded %s: text=%u data=%u@%08x bss=%u entry=%08x sp=%08x argc=%u\n",
            path, a.text, a.data, dv, a.bss, a.entry, sp, nav);
     return 0;
 }
@@ -1787,7 +1845,8 @@ typedef struct {
        nothing swaps it for them; we save and restore it around a switch, which
        is precisely what makes an fd opened by one process private to it. */
     u8  uarea[UAREA_SIZE];
-    u8  fdcon[3];                     /* which of 0-2 still go to the host */
+    u8  fdcon[64];                    /* its view of fd_console */
+    u8  fdpipe[64];                   /* ...and of fd_pipe        */
 } UProc;
 static UProc uprocs[MAX_UPROC];
 static int   ucur = -1, next_pid = 2, uproc_on;
@@ -1870,12 +1929,14 @@ static void uarea_dup_files(void)
 static void uarea_save(UProc *u)
 {
     for (u32 i = 0; i < UAREA_SIZE; i++) u->uarea[i] = mem_r8(UAREA_VA + i);
-    memcpy(u->fdcon, fd_console, 3);
+    memcpy(u->fdcon, fd_console, sizeof fd_console);
+    memcpy(u->fdpipe, fd_pipe, sizeof fd_pipe);
 }
 static void uarea_load(const UProc *u)
 {
     for (u32 i = 0; i < UAREA_SIZE; i++) mem_w8(UAREA_VA + i, u->uarea[i]);
-    memcpy(fd_console, u->fdcon, 3);
+    memcpy(fd_console, u->fdcon, sizeof fd_console);
+    memcpy(fd_pipe, u->fdpipe, sizeof fd_pipe);
 }
 
 static void uctx_save(u32 pc)
@@ -1937,6 +1998,21 @@ static int uproc_syscall(u32 sysno, u32 tpc)
     UProc *me = &uprocs[ucur];
     u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
 
+    /* Mach traps come in on the same vector with a negative number, and the
+       kernel routes them through mach_trap_table -- which in this build is
+       kern_invalid for all but one entry.  Delivering them for real instead
+       walks off the front of sysent into whatever function happens to lie
+       there (wait1, as it turns out) and panics.  Their stubs have no error
+       branch, so the return is tpc+4 with the status in r2. */
+    if ((s32)sysno < 0) {
+        if (trace_traps)
+            printf("[uproc] pid %d mach trap %d -> KERN_INVALID_ARGUMENT\n",
+                   me->pid, (int)(s32)sysno);
+        WR(2, 4);                                  /* KERN_INVALID_ARGUMENT */
+        cpu.pc = tpc + 4;
+        return 1;
+    }
+
     switch (sysno) {
     case 20: WR(2, me->pid);  cpu.pc = tpc + 8; return 1;   /* getpid  */
     case 39: WR(2, me->ppid); cpu.pc = tpc + 8; return 1;   /* getppid */
@@ -1956,11 +2032,19 @@ static int uproc_syscall(u32 sysno, u32 tpc)
         c->pc = tpc + 8;
         uarea_dup_files();          /* the child gets a reference too... */
         uarea_save(c);              /* ...and its own copy of the table   */
-        printf("[uproc] pid %d forked -> pid %d (aspace %08x)\n",
+        if (!quiet_uproc) printf("[uproc] pid %d forked -> pid %d (aspace %08x)\n",
                me->pid, c->pid, child_as);
+        /* Run the CHILD first.  Processes here run one at a time, so whoever
+           runs first must be the one that can make progress -- and after a
+           fork that is always the child.  Let the parent go on instead and it
+           reads its half of the pipe while the writer has not run yet; the
+           kernel then tries to sleep on behalf of what it still believes is
+           the idle process, and panics.  So the parent's fork return is
+           banked here and taken up when the child exits or blocks. */
         WR(2, (u32)c->pid);
         WR(3, 0);                                           /* parent */
-        cpu.pc = tpc + 8;
+        uctx_save(tpc + 8);
+        uctx_load(ci);
         return 1;
     }
 
@@ -2021,10 +2105,10 @@ static int uproc_syscall(u32 sysno, u32 tpc)
                                    av, nav, ev, nev);
         usegtab_cur = save;
         if (rc) {
-            printf("[uproc] pid %d execve(\"%s\") -> ENOENT\n", me->pid, path);
+            if (!quiet_uproc) printf("[uproc] pid %d execve(\"%s\") -> ENOENT\n", me->pid, path);
             WR(2, 2); cpu.pc = tpc + 4; return 1;           /* ENOENT */
         }
-        printf("[uproc] pid %d execve(\"%s\") argc=%u\n", me->pid, path, nav);
+        if (!quiet_uproc) printf("[uproc] pid %d execve(\"%s\") argc=%u\n", me->pid, path, nav);
         me->segtab = fresh;
         for (int i = 1; i < 32; i++) WR(i, 0);
         WR(31, sp);
@@ -2036,7 +2120,7 @@ static int uproc_syscall(u32 sysno, u32 tpc)
     case 1: {                                               /* exit(status) */
         me->zombie = 1;
         me->status = (int)((a0 & 0xff) << 8);
-        printf("[uproc] pid %d exited(%u)\n", me->pid, a0 & 0xff);
+        if (!quiet_uproc) printf("[uproc] pid %d exited(%u)\n", me->pid, a0 & 0xff);
         int pi = uproc_find_pid(me->ppid);
         if (pi >= 0 && uprocs[pi].waiting) {                /* wake the parent */
             uprocs[pi].waiting = 0;
@@ -2351,9 +2435,31 @@ static int run_sys(const char *path, u64 limit, u32 sig)
             }
             break;
         }
-        /* _simple_lock_failed: report who spun on what, once. */
-        if (cpu.pc == 0xC0018170u) {
+        /* _panic: the message is the single most useful thing the kernel can
+           tell us, and it is lost if we only catch the throttled printf. */
+        if (cpu.pc == 0xC005AFE0u) {
+            char m[160];
+            mem_cstr(RD(2), m, sizeof m);
+            printf("[PANIC] %s  (from %08x, @%llu)\n", m, RD(1),
+                   (unsigned long long)cpu.count);
+            if (dump_pchist) {
+                printf("--- last %d PCs before the panic ---\n", PCH_N);
+                for (unsigned k = 0; k < PCH_N; k++)
+                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                           (k % 8 == 7) ? "\n" : " ");
+                printf("\n");
+            }
+        }
+        /* _simple_lock_failed / _pmap_lock: report who spun on what, once. */
+        if (cpu.pc == 0xC0018170u || cpu.pc == 0xC00A7C78u) {
             static int once;
+            if (!once && dump_pchist) {
+                printf("--- last %d PCs before the spin ---\n", PCH_N);
+                for (unsigned k = 0; k < PCH_N; k++)
+                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                           (k % 8 == 7) ? "\n" : " ");
+                printf("\n");
+            }
             if (!once++)
                 printf("[lockspin] simple_lock(%08x) failed; r1=%08x r26=%08x "
                        "r25=%08x r27=%08x @%llu\n", RD(2), RD(1), RD(26),
@@ -2422,9 +2528,17 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         }
         if (fd_watch_pc && cpu.pc == fd_watch_pc + 8u
             && !(cpu.cr[1] & 0x80000000u)) {
-            if (RD(2) < 64) fd_kernel[RD(2)] = 1;      /* kernel owns this fd */
-            if (fd_watch_pair && RD(3) < 64) fd_kernel[RD(3)] = 1;  /* pipe(2) */
-            fd_watch_pc = 0; fd_watch_pair = 0;
+            if (RD(2) < 64) {
+                fd_kernel[RD(2)] = 1;                  /* kernel owns this fd */
+                if (fd_watch_con) fd_console[RD(2)] = 1;
+                if (fd_watch_pipe) fd_pipe[RD(2)] = fd_watch_pipe;
+            }
+            if (fd_watch_pair && RD(3) < 64 && RD(2) < 64) {
+                fd_kernel[RD(3)] = 1;                  /* pipe(2): two fds */
+                int pi = pipe_alloc();                 /* ...one buffer     */
+                if (pi >= 0) fd_pipe[RD(2)] = fd_pipe[RD(3)] = (u8)(pi + 1);
+            }
+            fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0;
         }
         if (step()) {
             /* Faithful userland: deliver real synchronous traps (syscalls via
@@ -2466,15 +2580,25 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
                     && (RD(9) == 5 || RD(9) == 8 || RD(9) == 41 || RD(9) == 90
                         || RD(9) == 42))
-                    fd_watch_pc = trap_pc, fd_watch_pair = (RD(9) == 42);
+                {
+                    fd_watch_pc = trap_pc;
+                    fd_watch_pair = (RD(9) == 42);
+                    /* dup: whatever the new descriptor turns out to be, it is
+                       the host's terminal exactly when the source was.  The
+                       shell reads its input through a dup of fd 0, so without
+                       this its `read` builtin sees EOF. */
+                    fd_watch_con = (RD(9) == 41 && RD(2) < 64) ? fd_console[RD(2)] : 0;
+                    fd_watch_pipe = (RD(9) == 41 && RD(2) < 64) ? fd_pipe[RD(2)] : 0;
+                }
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
                     && RD(2) < 64)
-                    fd_kernel[RD(2)] = 0;              /* close() releases it */
-                /* A dup2 onto 0, 1 or 2 is a redirect: that descriptor now
-                   belongs to the kernel (a file, or a pipe), not the host. */
+                    fd_kernel[RD(2)] = fd_console[RD(2)] = fd_pipe[RD(2)] = 0;
+                /* dup2 replaces the target outright, terminal-ness included --
+                   this is how a shell redirect takes stdout off the console. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
-                    && RD(9) == 90 && RD(3) < 3)
-                    fd_console[RD(3)] = 0;
+                    && RD(9) == 90 && RD(3) < 64 && RD(2) < 64)
+                    fd_console[RD(3)] = fd_console[RD(2)],
+                    fd_pipe[RD(3)] = fd_pipe[RD(2)];
                 deliver_trap(trap_vector, trap_pc);
                 if (trace_traps) trace_pc_until = cpu.count + trace_len;
                 trap_taken = 0;
@@ -2589,6 +2713,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--utest")) { utest = 1; deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--no-console")) console_io = 0;
+        else if (!strcmp(argv[i], "--quiet")) trace_traps = 0, quiet_uproc = 1;
         else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV)
             uargv[nuargv++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP)
