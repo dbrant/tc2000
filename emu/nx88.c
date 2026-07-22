@@ -469,6 +469,7 @@ static u32  dump_addr;
 static u32  findpt_va;
 static u32  watch_pc;
 static int  dump_pchist;
+static int  dump_uarea;
 static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
@@ -1620,12 +1621,20 @@ static u32 udemand_page(u32 apr, u32 va)
    console. */
 static int  console_io = 1;                 /* --no-console disables      */
 static u8   fd_kernel[64];                  /* fd allocated by the kernel */
+static u8   fd_console[3] = { 1, 1, 1 };    /* 0-2 still wired to the host */
+/* The bootstrap stub (see launch_utest) lives here and ends with this private
+   syscall number, which the process manager turns into the first exec. */
+#define UAREA_VA   0xFBFFE000u          /* _u: the per-process kernel state */
+#define UAREA_SIZE 0x2000u
+#define UBOOT_VA   0x7F000000u
+#define UBOOT_DONE 0x3F0u
 static u32  fd_watch_pc;                    /* trap pc of an fd-returning syscall */
+static int  fd_watch_pair;                  /* ...and it was pipe(2), returning two */
 static u32  con_out_bytes, con_in_bytes;
 
 static int fd_is_console(u32 fd)
 {
-    return console_io && fd < 3 && !fd_kernel[fd];
+    return console_io && fd < 3 && fd_console[fd];
 }
 
 /* Service a syscall entirely in the emulator.  Returns 1 if handled, and
@@ -1751,13 +1760,6 @@ static int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_o
     return 0;
 }
 
-static int load_user_prog(const char *path, u32 segtab, u32 *entry, u32 *sp_out)
-{
-    if (!nuargv) uargv[nuargv++] = path;         /* argv[0] defaults to the path */
-    return load_user_prog_av(path, segtab, entry, sp_out,
-                             uargv, nuargv, uenvp, nuenvp);
-}
-
 /* ------------------------------------------------------- process management
    nX's own fork/exec/exit operate on Mach proc + thread structures that our
    synthetic proc1 only approximates; exit() alone walks the parent pointer, the
@@ -1780,6 +1782,12 @@ typedef struct {
     int pid, ppid;
     u32 wait_statusp;                 /* wait4's status pointer, if blocked */
     u32 segtab, pc, r[32];
+    /* The u-area is the per-process kernel state -- descriptor table, cwd,
+       signal disposition, limits.  Our processes are not real nX processes, so
+       nothing swaps it for them; we save and restore it around a switch, which
+       is precisely what makes an fd opened by one process private to it. */
+    u8  uarea[UAREA_SIZE];
+    u8  fdcon[3];                     /* which of 0-2 still go to the host */
 } UProc;
 static UProc uprocs[MAX_UPROC];
 static int   ucur = -1, next_pid = 2, uproc_on;
@@ -1839,12 +1847,44 @@ static void uproc_activate(u32 segtab)
     tlb_flush();
 }
 
+/* u_ofile, the descriptor table, found by opening three files from the
+   bootstrap stub and looking for consecutive kernel pointers in the u-area
+   (--uarea dumps it).  Each entry is a struct file: f_flag at +0x08, then
+   f_type and f_count as shorts at +0x0c.  fork has to bump f_count for every
+   open descriptor, or the first child to close one frees a file the other
+   processes still point at. */
+#define U_OFILE   0x748u
+#define U_NOFILE  64
+#define F_COUNT   0x0eu
+
+static void uarea_dup_files(void)
+{
+    for (int i = 0; i < U_NOFILE; i++) {
+        u32 f = mem_r32(UAREA_VA + U_OFILE + 4 * i);
+        if (f < 0xC0000000u || f >= 0xC8000000u) continue;
+        u32 pa = translate(f + F_COUNT, 0);
+        mem_w16(pa, (u16)(mem_r16(pa) + 1));
+    }
+}
+
+static void uarea_save(UProc *u)
+{
+    for (u32 i = 0; i < UAREA_SIZE; i++) u->uarea[i] = mem_r8(UAREA_VA + i);
+    memcpy(u->fdcon, fd_console, 3);
+}
+static void uarea_load(const UProc *u)
+{
+    for (u32 i = 0; i < UAREA_SIZE; i++) mem_w8(UAREA_VA + i, u->uarea[i]);
+    memcpy(fd_console, u->fdcon, 3);
+}
+
 static void uctx_save(u32 pc)
 {
     if (ucur < 0) return;
     UProc *u = &uprocs[ucur];
     u->pc = pc;
     for (int i = 0; i < 32; i++) u->r[i] = RD(i);
+    uarea_save(u);
 }
 
 static void uctx_load(int i)
@@ -1854,6 +1894,7 @@ static void uctx_load(int i)
     for (int k = 1; k < 32; k++) WR(k, u->r[k]);
     cpu.pc = u->pc;
     cpu.cr[1] = 0;                                  /* user mode */
+    uarea_load(u);
     uproc_activate(u->segtab);
 }
 
@@ -1913,11 +1954,43 @@ static int uproc_syscall(u32 sysno, u32 tpc)
         c->r[2] = (u32)me->pid;
         c->r[3] = 1;                                        /* child  */
         c->pc = tpc + 8;
+        uarea_dup_files();          /* the child gets a reference too... */
+        uarea_save(c);              /* ...and its own copy of the table   */
         printf("[uproc] pid %d forked -> pid %d (aspace %08x)\n",
                me->pid, c->pid, child_as);
         WR(2, (u32)c->pid);
         WR(3, 0);                                           /* parent */
         cpu.pc = tpc + 8;
+        return 1;
+    }
+
+    case UBOOT_DONE: {          /* bootstrap stub finished its three opens */
+        u32 fresh = upool_alloc(), entry, sp;
+        u32 save = usegtab_cur;
+        usegtab_cur = 0;
+        if (!nuargv) uargv[nuargv++] = uprog_path;
+        int rc = load_user_prog_av(uprog_path, fresh, &entry, &sp,
+                                   uargv, nuargv, uenvp, nuenvp);
+        usegtab_cur = save;
+        if (rc) { fprintf(stderr, "[uproc] could not load %s\n", uprog_path);
+                  uproc_all_done = 1; return 1; }
+        me->segtab = fresh;
+        for (int i = 1; i < 32; i++) WR(i, 0);
+        WR(31, sp);
+        cpu.pc = entry;
+        uproc_activate(fresh);
+        if (dump_uarea) {
+            printf("[uarea] u-area +0x730..+0x790:\n");
+            for (u32 o = 0x730; o < 0x790; o += 4)
+                printf("   +%04x = %08x\n", o, mem_r32(UAREA_VA + o));
+            for (int k = 0; k < 3; k++) {
+                u32 f = mem_r32(UAREA_VA + 0x748 + 4 * k);
+                printf("[uarea] file[%d] @%08x:", k, f);
+                for (u32 o = 0; o < 0x3c; o += 4)
+                    printf(" %08x", mem_r32(translate(f + o, 0)));
+                printf("\n");
+            }
+        }
         return 1;
     }
 
@@ -2102,9 +2175,36 @@ static void launch_utest(void)
     /* --uprog=PATH: run a real nX binary from the extracted tape instead of the
        4-instruction probe.  Overrides the entry PC and stack. */
     u32 usp = 0xF000u;
-    if (uprog_path && load_user_prog(uprog_path, segtab, &uva, &usp) != 0) {
-        fprintf(stderr, "[utest] could not load %s\n", uprog_path);
-        uprog_path = NULL;
+    if (uprog_path) {
+        /* Before the program runs, open the three standard descriptors for
+           real.  The process starts with an empty descriptor table, so an
+           un-bootstrapped pipe() is handed 0 and 1 and collides head-on with
+           the console -- the shell then dup2's its pipeline over stdin/stdout
+           and everything unravels.  Three genuine kernel opens put real file
+           structs in slots 0-2, so pipe() starts at 3 where it belongs.
+
+           The opens have to be issued from user mode, so they are a short
+           stub the process executes before its entry point; it ends with the
+           private syscall UBOOT_DONE, which loads the real program. */
+        u32 stub = upool_alloc();
+        umap(segtab, UBOOT_VA, stub);
+        static const char devnull[] = "/dev/null";
+        for (unsigned i = 0; i < sizeof devnull; i++)
+            mem_w8(stub + 0x80 + i, (u8)devnull[i]);
+        u32 pathva = UBOOT_VA + 0x80, w = 0;
+        for (int k = 0; k < 3; k++) {
+            mem_w32(stub + w, 0x5C400000u | (pathva >> 16));         w += 4;
+            mem_w32(stub + w, 0x58420000u | (pathva & 0xFFFF));      w += 4;
+            mem_w32(stub + w, 0x58600002u);   /* or r3, r0, 2  O_RDWR */ w += 4;
+            mem_w32(stub + w, 0x59200005u);   /* or r9, r0, 5  open  */ w += 4;
+            mem_w32(stub + w, 0xf000d080u);   /* tb0 0, r0, 128      */ w += 4;
+            mem_w32(stub + w, 0xc0000001u);   /* br +1: error -> on  */ w += 4;
+        }
+        mem_w32(stub + w, 0x59200000u | UBOOT_DONE);                 w += 4;
+        mem_w32(stub + w, 0xf000d080u);                              w += 4;
+        mem_w32(stub + w, 0xc0000000u);       /* br . (never reached) */
+        uva = UBOOT_VA;
+        usp = STACK_TOP - 0x100u;             /* demand-paged */
     }
     uproc_activate(segtab);                         /* APRs + demand paging */
     /* Register it as pid 1 of the emulator-managed process table, so its
@@ -2323,7 +2423,8 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         if (fd_watch_pc && cpu.pc == fd_watch_pc + 8u
             && !(cpu.cr[1] & 0x80000000u)) {
             if (RD(2) < 64) fd_kernel[RD(2)] = 1;      /* kernel owns this fd */
-            fd_watch_pc = 0;
+            if (fd_watch_pair && RD(3) < 64) fd_kernel[RD(3)] = 1;  /* pipe(2) */
+            fd_watch_pc = 0; fd_watch_pair = 0;
         }
         if (step()) {
             /* Faithful userland: deliver real synchronous traps (syscalls via
@@ -2363,11 +2464,17 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                 /* Remember fd-returning syscalls so their result can be marked
                    kernel-owned when control comes back to user mode. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
-                    && (RD(9) == 5 || RD(9) == 8 || RD(9) == 41 || RD(9) == 90))
-                    fd_watch_pc = trap_pc;
+                    && (RD(9) == 5 || RD(9) == 8 || RD(9) == 41 || RD(9) == 90
+                        || RD(9) == 42))
+                    fd_watch_pc = trap_pc, fd_watch_pair = (RD(9) == 42);
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
                     && RD(2) < 64)
                     fd_kernel[RD(2)] = 0;              /* close() releases it */
+                /* A dup2 onto 0, 1 or 2 is a redirect: that descriptor now
+                   belongs to the kernel (a file, or a pipe), not the host. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && RD(9) == 90 && RD(3) < 3)
+                    fd_console[RD(3)] = 0;
                 deliver_trap(trap_vector, trap_pc);
                 if (trace_traps) trace_pc_until = cpu.count + trace_len;
                 trap_taken = 0;
@@ -2475,6 +2582,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--findpt=", 9)) findpt_va = (u32)strtoul(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "--pchist")) dump_pchist = 1;
+        else if (!strcmp(argv[i], "--uarea")) dump_uarea = 1;
         else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);
         else if (!strcmp(argv[i], "--uland")) uland_probe = 1;
         else if (!strcmp(argv[i], "--deliver-traps")) deliver_traps = 1;
