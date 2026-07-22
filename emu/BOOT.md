@@ -32,6 +32,41 @@ Defaults: the **real-memory model** (`--realmm`) with translation and EEPROM sig
 `--scsitrace`, `--clock`, `--pcsample=N`, `--pchist` (dump the last 64K PCs at halt —
 the tool that cracked several blockers), `--watch=PC`, `--root=PATH`, `--nodes=N`.
 
+### The kernel's own boot messages — `--kmsg`
+
+`--kmsg` prints everything the kernel says, formatted by the kernel itself. It
+hooks `putchar` in `subr_prf.o` (`0xC005B218`), the funnel every `printf`
+character passes through, rather than reconstructing messages from format
+strings the way the older `--log` does. Combines with anything:
+
+```sh
+./nx88.exe sys <path-to>/tapeimage/vmunix --shell --kmsg
+```
+
+```
+[nx] Configuring the processors ...
+[nx] nX Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989
+[nx] Physical memory = 1024.00 megabytes.
+[nx] Buffer allocation across Bay.Midplane.Node[0 - 7]:
+[nx] 7.0.*:   0x0   0x28  0x29  0x29  0x29  0x29  0x29  0x29
+[nx] BBN TC2000
+[nx] Probing for VMEbus
+[nx] mb0 is iobus 0 on processor node 0.7.7
+[nx] xyprobe: error on xy controller at fc000e40, csr = 0
+[nx] Cluster startup: 64 node system ... 1 node public cluster
+[nx] Configuring SCSI devices
+[nx] WARNING: TOY clock not found, setting time from file system
+[nx] Root fstype 4.3
+[nx] network interface lo, unit 0, on iobus -3 is "lo0"
+```
+
+Every message goes through `putchar` **twice** — once with flags=1 for the
+console and again with flags=4 for msgbuf/syslog — while `log()` messages with
+a priority (the `<6>...` ones) take only the second path. So the two streams
+are assembled into lines separately and a syslog line is printed only when it
+isn't the one the console just showed. That yields each message exactly once,
+console and syslog alike.
+
 ### An interactive shell
 
 ```sh

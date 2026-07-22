@@ -334,6 +334,7 @@ static u32  force_sig_val;
 static int  log_msgs;
 #define LOG_ROUTINE     0xC005A85Cu
 #define PRINTF_THROTTLE 0xC005A9D0u
+#define KERN_PUTCHAR    0xC005B218u   /* subr_prf.o putchar(c, ...) */
 
 /*
  * MC88200 CMMU ID registers.
@@ -472,6 +473,7 @@ static int  dump_pchist;
 static int  dump_uarea;
 static int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 static int  interactive;      /* --shell: hand the terminal to /bin/sh */
+static int  kmsgs;            /* --kmsg: echo the kernel's console output */
 static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
@@ -1573,6 +1575,51 @@ static int run_user(const char *path, int argc, char **argv, u64 limit)
     return 0;
 }
 
+/* --------------------------------------------------- kernel console output
+   subr_prf.o funnels every character a kernel printf produces through
+   putchar(c, flags), so hooking it prints the kernel's own log fully
+   formatted rather than reconstructing it from format strings.
+
+   Each message goes through TWICE, though: once with flags=1 for the console
+   and again with flags=4 for msgbuf/syslog.  Messages from log() with a
+   priority (the `<6>...' ones) take only the second path.  So both streams are
+   assembled into lines separately, and a syslog line is printed only if it
+   isn't the one the console just showed -- which yields every message exactly
+   once, console and syslog alike. */
+#define KMSG_MAX 512
+static char kmsg_cons[KMSG_MAX], kmsg_log[KMSG_MAX], kmsg_last[KMSG_MAX];
+static int  kmsg_conslen, kmsg_loglen;
+
+static void kmsg_line(const char *s, int is_log)
+{
+    if (is_log && !strcmp(s, kmsg_last)) return;      /* console already had it */
+    printf("[nx] %s\n", s);
+    fflush(stdout);
+    if (!is_log) { strncpy(kmsg_last, s, KMSG_MAX - 1); kmsg_last[KMSG_MAX-1] = 0; }
+}
+
+static void kmsg_putchar(int c, u32 flags)
+{
+    int is_log = !(flags & 1);
+    char *buf = is_log ? kmsg_log : kmsg_cons;
+    int  *len = is_log ? &kmsg_loglen : &kmsg_conslen;
+    if (c == '\n' || *len >= KMSG_MAX - 1) {
+        buf[*len] = 0;
+        if (*len) kmsg_line(buf, is_log);
+        *len = 0;
+        if (c != '\n' && c) buf[(*len)++] = (char)c;
+        return;
+    }
+    if (c == '\r' || !c) return;
+    buf[(*len)++] = (char)c;
+}
+
+static void kmsg_flush(void)
+{
+    if (kmsg_conslen) { kmsg_cons[kmsg_conslen] = 0; kmsg_line(kmsg_cons, 0); kmsg_conslen = 0; }
+    if (kmsg_loglen)  { kmsg_log[kmsg_loglen]  = 0; kmsg_line(kmsg_log, 1);  kmsg_loglen  = 0; }
+}
+
 /* ------------------------------------------------------------ system mode */
 
 /* ---- minimal userland bring-up (increment 2): drop a tiny program into user
@@ -2421,6 +2468,7 @@ static int run_sys(const char *path, u64 limit, u32 sig)
            and report the milestone instead.) */
         if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u
             && !uland_probe) {
+            if (kmsgs) kmsg_flush();
             printf("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
                    (unsigned long long)cpu.count);
@@ -2478,6 +2526,13 @@ static int run_sys(const char *path, u64 limit, u32 sig)
         if (pcsample && (cpu.count % pcsample) == 0)
             printf("[pc] @%llu pc=%08x\n",
                    (unsigned long long)cpu.count, cpu.pc);
+        /* Kernel console output.  subr_prf.o funnels every character printf
+           produces through _putchar(c, ...), whatever the message started out
+           as -- so hooking it prints the kernel's own log, fully formatted,
+           instead of reconstructing it from format strings.  The real putchar
+           goes on to msgbuf and cnputc; we only watch. */
+        if (kmsgs && cpu.pc == KERN_PUTCHAR)
+            kmsg_putchar((int)(RD(2) & 0xff), RD(3));
         if (log_msgs) {
             if (cpu.pc == LOG_ROUTINE) {
                 char fmt[200];
@@ -2577,7 +2632,7 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                     trap_taken = 0;
                     if (uproc_all_done) {
                         if (interactive)
-                            printf("\n[nx] shell exited -- machine halted.\n");
+                            printf("\n[halt] shell exited -- machine halted.\n");
                         else
                             printf("[uproc] all processes exited @%llu\n",
                                    (unsigned long long)cpu.count);
@@ -2703,6 +2758,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--scale=", 8)) tick_scale = (u32)strtoul(argv[i] + 8, 0, 0);
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
+        else if (!strcmp(argv[i], "--kmsg")) kmsgs = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
