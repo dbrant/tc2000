@@ -474,6 +474,8 @@ static int  dump_uarea;
 static int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 static int  interactive;      /* --shell: hand the terminal to /bin/sh */
 static int  kmsgs;            /* --kmsg: echo the kernel's console output */
+static int  brk_passthru;     /* --brk-passthru: let obreak reach the kernel */
+static u32  brk_watch_pc, brk_watch_arg;
 static u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 static u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
 static int  uland_probe;              /* dump run queue at the swapper sleep */
@@ -1679,6 +1681,7 @@ static u8   fd_console[64] = { 1, 1, 1 };   /* which fds still reach the host */
 #define UAREA_VA   0xFBFFE000u          /* _u: the per-process kernel state */
 #define UAREA_SIZE 0x2000u
 #define UBOOT_VA   0x7F000000u
+#define UBRK_TOP   0x00400000u          /* data segment granted to the kernel */
 #define UBOOT_DONE 0x3F0u
 static u32  fd_watch_pc;                    /* trap pc of an fd-returning syscall */
 static int  fd_watch_pair;                  /* ...and it was pipe(2), returning two */
@@ -1890,6 +1893,7 @@ typedef struct {
     int used, zombie, waiting, status;
     int pid, ppid;
     u32 wait_statusp;                 /* wait4's status pointer, if blocked */
+    u32 brk;                          /* heap break -- ours, not the kernel's */
     u32 segtab, pc, r[32];
     /* The u-area is the per-process kernel state -- descriptor table, cwd,
        signal disposition, limits.  Our processes are not real nX processes, so
@@ -2068,6 +2072,24 @@ static int uproc_syscall(u32 sysno, u32 tpc)
     case 20: WR(2, me->pid);  cpu.pc = tpc + 8; return 1;   /* getpid  */
     case 39: WR(2, me->ppid); cpu.pc = tpc + 8; return 1;   /* getppid */
 
+    /* obreak.  The heap has to be ours because the address space is: our
+       processes all share proc0's vm_map, so the kernel's break is a single
+       shared value.  The first program to grow the heap moved it, and the next
+       one's opening obreak -- asking for a lower address than the shared map
+       had reached -- was refused, which is why a second `ls' died with "out of
+       memory".  Demand paging backs whatever the program then touches. */
+    case 17:
+        /* ...except the bootstrap stub's one real obreak, which is how the
+           kernel learns the data segment is big enough for useracc. */
+        if (brk_passthru || (tpc & ~0xFFFu) == UBOOT_VA) {
+            brk_watch_pc = tpc; brk_watch_arg = a0;
+            return 0;
+        }
+        me->brk = a0;
+        WR(2, 0);
+        cpu.pc = tpc + 8;
+        return 1;
+
     case 2: case 66: {                                      /* fork/vfork */
         u32 child_as = aspace_clone(me->segtab);
         int ci = uproc_new(me->pid, child_as);
@@ -2189,23 +2211,32 @@ static int uproc_syscall(u32 sysno, u32 tpc)
         return 1;
     }
 
-    case 7: case 84: {                                      /* wait / wait4 */
+    case 7: case 84: {                                      /* wait4 / wait */
+        /* Syscall 7 is wait4(pid, statusp, options, rusage) -- the status
+           POINTER is the second argument, and the shell reads $? out of it.
+           Writing the status only to r3 left $? stuck at 0 for every command,
+           which matters: the install script branches on `case $?'.  Syscall 84
+           is the older wait(statusp), status in the first argument. */
+        int   want  = (sysno == 7) ? (int)(s32)a0 : -1;
+        u32   stptr = (sysno == 7) ? a1 : a0;
         for (int i = 0; i < MAX_UPROC; i++)
-            if (uprocs[i].used && uprocs[i].zombie && uprocs[i].ppid == me->pid) {
+            if (uprocs[i].used && uprocs[i].zombie && uprocs[i].ppid == me->pid
+                && (want <= 0 || uprocs[i].pid == want)) {
                 int pid = uprocs[i].pid, st = uprocs[i].status;
                 uprocs[i].used = 0;
                 WR(2, (u32)pid); WR(3, (u32)st);
-                if (sysno == 84 && a1) uwrite32(me->segtab, a1, (u32)st);
+                if (stptr) uwrite32(me->segtab, stptr, (u32)st);
                 cpu.pc = tpc + 8;
                 return 1;
             }
         int kids = 0;
         for (int i = 0; i < MAX_UPROC; i++)
-            if (uprocs[i].used && uprocs[i].ppid == me->pid) kids++;
+            if (uprocs[i].used && uprocs[i].ppid == me->pid
+                && (want <= 0 || uprocs[i].pid == want)) kids++;
         if (!kids) { WR(2, 10); cpu.pc = tpc + 4; return 1; }   /* ECHILD */
         uctx_save(tpc + 8);                                 /* block, run a child */
         me->waiting = 1;
-        me->wait_statusp = (sysno == 84) ? a1 : 0;
+        me->wait_statusp = stptr;
         int n = uproc_runnable();
         if (n < 0) { uproc_all_done = 1; return 1; }
         uctx_load(n);
@@ -2335,6 +2366,20 @@ static void launch_utest(void)
             mem_w32(stub + w, 0xf000d080u);   /* tb0 0, r0, 128      */ w += 4;
             mem_w32(stub + w, 0xc0000001u);   /* br +1: error -> on  */ w += 4;
         }
+        /* One real obreak, to a break far above anything a program will ask
+           for.  The heap itself is ours (see the obreak case in
+           uproc_syscall), but the kernel still validates user pointers against
+           the data segment it believes the process has -- useracc, which
+           sigreturn uses.  longjmp here IS sigreturn, with the sigcontext
+           sitting in the program's data, so without this every longjmp fails
+           and the shell reports "longjmp botch".  Granting the segment once
+           covers every process, since they share the one vm_map. */
+        mem_w32(stub + w, 0x5C400000u | (UBRK_TOP >> 16));           w += 4;
+        mem_w32(stub + w, 0x58420000u | (UBRK_TOP & 0xFFFF));        w += 4;
+        mem_w32(stub + w, 0x59200011u);       /* or r9, r0, 17  obreak */ w += 4;
+        mem_w32(stub + w, 0xf000d080u);                              w += 4;
+        mem_w32(stub + w, 0xc0000001u);       /* br +1: error -> on  */ w += 4;
+
         mem_w32(stub + w, 0x59200000u | UBOOT_DONE);                 w += 4;
         mem_w32(stub + w, 0xf000d080u);                              w += 4;
         mem_w32(stub + w, 0xc0000000u);       /* br . (never reached) */
@@ -2588,6 +2633,13 @@ static int run_sys(const char *path, u64 limit, u32 sig)
                 }
             }
         }
+        if (brk_watch_pc && !(cpu.cr[1] & 0x80000000u)
+            && (cpu.pc == brk_watch_pc + 4u || cpu.pc == brk_watch_pc + 8u)) {
+            if (!quiet_uproc)
+                printf("[brk] obreak(%08x) -> %s, r2=%08x r3=%08x\n", brk_watch_arg,
+                       cpu.pc == brk_watch_pc + 8u ? "ok" : "ERR", RD(2), RD(3));
+            brk_watch_pc = 0;
+        }
         if (fd_watch_pc && cpu.pc == fd_watch_pc + 8u
             && !(cpu.cr[1] & 0x80000000u)) {
             if (RD(2) < 64) {
@@ -2759,6 +2811,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose_sys = 1;
         else if (!strcmp(argv[i], "--log")) log_msgs = 1;
         else if (!strcmp(argv[i], "--kmsg")) kmsgs = 1;
+        else if (!strcmp(argv[i], "--brk-passthru")) brk_passthru = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
         else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
