@@ -37,6 +37,13 @@ Defaults: the **real-memory model** (`--realmm`) with translation and EEPROM sig
 `--scsitrace`, `--clock`, `--pcsample=N`, `--pchist` (dump the last 64K PCs at halt —
 the tool that cracked several blockers), `--watch=PC`, `--root=PATH`, `--nodes=N`.
 
+`--realu` (experimental, opt-in) virtualizes the per-process kernel u-area at the
+kernel's own `load_context` switches (`--lct` traces them), giving each process
+its own kernel-stack page instead of the one shared identity window. It clears
+the `--scsi` SCSI-probe `procdup` derail so the probe advances to the SHA
+re-probe; it is **not** default because it currently regresses the plain boot's
+root mount (the mount's fork children still pass state through a shared stack).
+
 ### The kernel's own boot messages — `--kmsg`
 
 `--kmsg` prints everything the kernel says, formatted by the kernel itself. It

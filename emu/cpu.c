@@ -340,6 +340,8 @@ int step(void)
                RD(9), (unsigned long long)cpu.count);
     }
 
+    if (pc == 0xc0017498u) lctx_switch(RD(2));
+
     if (watch_pc && pc == watch_pc) {
         printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x @%llu\n",
                pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6),

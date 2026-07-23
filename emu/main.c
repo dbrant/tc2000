@@ -30,6 +30,8 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--shadesc=", 10)) sha_desc_clear = (u32)strtoul(argv[i]+10,0,0);
         else if (!strcmp(argv[i], "--brk-passthru")) brk_passthru = 1;
         else if (!strcmp(argv[i], "--mmu")) mmu_trace = 1;
+        else if (!strcmp(argv[i], "--lct")) lct_trace = 1;
+        else if (!strcmp(argv[i], "--realu")) realu = 1;
         else if (!strcmp(argv[i], "--batc")) batc_trace = 1;
         else if (!strcmp(argv[i], "--tcs")) tcs_trace = 1;
         else if (!strcmp(argv[i], "--translate")) translate_on = 1;

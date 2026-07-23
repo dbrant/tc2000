@@ -76,6 +76,8 @@ u32 cmram_sel;
 u64 cmram_reads, cmram_writes;
 u8 **cmram_pages;                  /* dedicated CMRAM backing store */
 int  mmu_trace;
+int  lct_trace;
+int  realu;                         /* virtualize per-process u-area at load_context */
 int  batc_trace;
 u32  dump_addr;
 u32  findpt_va;
