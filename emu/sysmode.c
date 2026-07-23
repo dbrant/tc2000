@@ -309,6 +309,15 @@ int run_sys(const char *path, u64 limit, u32 sig)
             break;
         }
     }
+    /* Hit the instruction limit without derailing/panicking -- usually a spin.
+       Dump the ring so the loop body is visible (nothing else caught it). */
+    if (dump_pchist && cpu.count >= limit) {
+        printf("--- last %d PCs at the instruction limit (spin?) ---\n", PCH_N);
+        for (unsigned k = 0; k < PCH_N; k++)
+            printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                   (k % 8 == 7) ? "\n" : " ");
+        printf("\n");
+    }
     if (!quiet_uproc)
         for (int k = 0; k < 32; k += 4) {
             printf("  ");

@@ -236,11 +236,15 @@ void lctx_switch(u32 ctx)
     if (s >= 0) uwin_load(uslot[s].data);       /* restore a known process...  */
     /* ...otherwise leave the window: a new child inherits the parent's stack. */
     cur_u98 = new98;
-    if (lct_trace)
-        printf("[lct] switch->u98=%08x rpc=%08x (%s, %d slots) @%llu\n",
+    if (lct_trace) {
+        u32 node = mem_r32(translate(0xc0014008u, 0)) & 0xFFFFu;
+        u32 pteaddr = mem_r32(translate(0xc1015548u + node * 4, 0));
+        u32 old98 = pteaddr ? (mem_r32(translate(pteaddr, 0)) & 0xFFFFF000u) : 0;
+        printf("[lct] switch->u98=%08x rpc=%08x (%s, %d slots) pte_old98=%08x @%llu\n",
                new98, mem_r32(translate(ctx + 0x80, 0)),
-               s >= 0 ? "restored" : "inherited", nuslot,
+               s >= 0 ? "restored" : "inherited", nuslot, old98,
                (unsigned long long)cpu.count);
+    }
 }
 
 void uarea_save(UProc *u)

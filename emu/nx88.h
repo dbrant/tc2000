@@ -354,6 +354,7 @@ void dev_write32(u32 a, u32 v);
 void deliver_exception(u32 vector);
 void deliver_trap(u32 vector, u32 tpc);
 void sha_complete(void);
+void sha_sdcomplete(u32 cmd);
 double fp_read(u32 reg, int prec);
 void fp_write(u32 reg, int prec, double v);
 int step(void);

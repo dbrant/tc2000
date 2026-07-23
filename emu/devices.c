@@ -35,6 +35,14 @@ void memop(u32 sub, u32 D, u32 ea)
         WR(D, sub == 0x06 ? (u32)(s32)(int16_t)sha_status : sha_status);
         return;
     }
+    /* SHA command-submission "ready" register (base+0x10): _sha_cmd_wait polls
+       it for bit0 clear before writing the next command into the queue.  Our
+       SHA completes every command synchronously, so it is always ready -- report
+       bit0 clear, else the driver spins forever waiting for a doorbell ack. */
+    if (sysmode && ea == SHA_BASE + 0x10u && (sub == 0x02 || sub == 0x06)) {
+        WR(D, mem_r16(ea) & ~1u);
+        return;
+    }
     /* The free-running timer at 0xE07E8018 must respond to sub-word reads too:
        _startclock_duart polls it with ld.h and spins until it changes. */
     if (sysmode && (ea & ~3u) == TIMER_ADDR) {
@@ -140,6 +148,54 @@ void dev_write32(u32 a, u32 v)
                            off == CMMU_SAPR ? "SAPR" : "UAPR", v, cpu.pc);
             }
         }
+    }
+}
+
+/* Stand in for the SHA completion interrupt on the _sdcommand_nowait path.
+   The command block (recovered by dumping the live block at c00be6bc):
+     +0x00 command/status word (0xc1 on entry; bit5 => copy DMA data out)
+     +0x10 DMA buffer PHYSICAL address (data-in destination)
+     +0x44 SCSI target number
+     +0x6c CDB length (6)
+     +0x70.. CDB bytes (big-endian within the words)
+     +0x90 transfer length
+     +0x68 completion status (bit0 clear on entry => driver's success path)
+   For now we model a single direct-access disk at target 0 (routed to
+   emu/disk.img); every other target reports empty so sdprobe skips it. */
+void sha_sdcomplete(u32 cmd)
+{
+    u32 target = mem_r32(translate(cmd + 0x44, 0));
+    u32 dma    = mem_r32(translate(cmd + 0x10, 0));
+    u32 cdbw   = mem_r32(translate(cmd + 0x70, 0));
+    u32 xfer   = mem_r32(translate(cmd + 0x90, 0));
+    u8  op     = (u8)(cdbw >> 24);
+    if (scsi_trace)
+        printf("[sdcmd] target=%u op=%02x dma=%08x xfer=%u @%llu\n",
+               target, op, dma, xfer, (unsigned long long)cpu.count);
+
+    if (target != 0) return;       /* no device: leave block, driver skips */
+
+    u8 buf[256];
+    memset(buf, 0, sizeof buf);
+    u32 n = 0;
+    switch (op) {
+    case 0x12:                     /* INQUIRY */
+        buf[0] = 0x00;             /* peripheral type 0 = direct-access disk */
+        buf[1] = 0x00;             /* not removable */
+        buf[2] = 0x02;             /* SCSI-2 */
+        buf[3] = 0x02;             /* response format */
+        buf[4] = 0x1f;             /* additional length (31) */
+        memcpy(buf + 8,  "BBN     ", 8);
+        memcpy(buf + 16, "EMULATED DISK   ", 16);
+        memcpy(buf + 32, "0001", 4);
+        n = 36;
+        break;
+    default:
+        break;                     /* other commands: just complete good */
+    }
+    if (n && dma) {
+        if (n > xfer) n = xfer;
+        for (u32 i = 0; i < n; i++) mem_w8(dma + i, buf[i]);
     }
 }
 

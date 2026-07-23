@@ -148,6 +148,20 @@ int step(void)
         return 0;
     }
 
+    /* _sdcommand_nowait (c00be6bc) issues a SCSI command to the SHA and then
+       blocks via swtch_pri(-1) waiting for the completion interrupt to re-queue
+       it.  We model no interrupt, so it would deadlock -- and with nothing else
+       runnable the scheduler panics `unix_switch: NULL`.  Stand in for the
+       completion: execute the SCSI command against our modelled target, mark the
+       command block done, and return to the post-wait code (c00be6f0) instead of
+       switching.  Detected at swtch_pri's entry (r1 = the return into
+       _sdcommand_nowait, r27 = the command block). */
+    if (sha_sync && sysmode && pc == 0xC0055CC0u && RD(1) == 0xC00BE6F0u) {
+        sha_sdcomplete(RD(27));
+        cpu.pc = 0xC00BE6F0u;
+        return 0;
+    }
+
     /* Disk strategy.  Satisfying I/O at the biowait below covers only the
        SYNCHRONOUS case, and the buffer cache does not read that way for long:
        a sequential read issues a B_ASYNC read-ahead, whose completion is
@@ -341,6 +355,24 @@ int step(void)
     }
 
     if (pc == 0xc0017498u) lctx_switch(RD(2));
+
+    if (lct_trace && pc == 0xc0071db8u) {   /* vfs_mountroot's jsr to fs mountroot */
+        printf("[mount] jsr arg=%08x curproc=%08x cur_u98=%08x r31=%08x @%llu\n",
+               RD(2), mem_r32(translate(0xFBFFE0F0u, 0)), cur_u98, RD(31),
+               (unsigned long long)cpu.count);
+    }
+    if (lct_trace && pc == 0xc004e954u) {   /* __gh_mvb: r1=procdup() return */
+        printf("[fork] procdup ret r2=%08x cur_u98=%08x -> %s @%llu\n",
+               RD(2), cur_u98, RD(2) ? "CHILD-path" : "parent-path",
+               (unsigned long long)cpu.count);
+    }
+    if (lct_trace && pc == 0xc0055cc0u) {   /* _swtch_pri entry */
+        u32 wq_lo = mem_r32(translate(0xC00145B0u, 0));
+        u32 wq_hi = mem_r32(translate(0xC00145B4u, 0));
+        printf("[swtch] pri=%08x caller=%08x curproc=%08x whichqs=%08x:%08x @%llu\n",
+               RD(2), RD(1), mem_r32(translate(0xFBFFE0F0u, 0)), wq_hi, wq_lo,
+               (unsigned long long)cpu.count);
+    }
 
     if (watch_pc && pc == watch_pc) {
         printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x @%llu\n",
