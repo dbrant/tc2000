@@ -23,9 +23,14 @@ valid node-local physical address, so the boot loader's map is essentially ident
 
 ```sh
 export PATH="/c/msys64/ucrt64/bin:$PATH"
-gcc -O2 -Wall -o nx88.exe nx88.c
+./build.sh                                         # or: make
 ./nx88.exe sys <path-to>/tapeimage/vmunix          # root image auto-derived: <tapedir>.img
 ```
+
+The emulator is split by theme across a dozen small `.c` files plus a shared
+`nx88.h`; see the header's top comment for the module map. All machine state
+and configuration flags live in `globals.c`; each other file holds one
+subsystem's behaviour.
 
 Defaults: the **real-memory model** (`--realmm`) with translation and EEPROM signature `'A'`.
 `--identity` selects the superseded identity+fallback path. Useful flags: `--log`,
