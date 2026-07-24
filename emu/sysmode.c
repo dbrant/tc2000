@@ -229,13 +229,14 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 fd_kernel[RD(2)] = 1;                  /* kernel owns this fd */
                 if (fd_watch_con) fd_console[RD(2)] = 1;
                 if (fd_watch_pipe) fd_pipe[RD(2)] = fd_watch_pipe;
+                if (fd_watch_disk) { fd_disk[RD(2)] = 1; disk_off[RD(2)] = 0; }
             }
             if (fd_watch_pair && RD(3) < 64 && RD(2) < 64) {
                 fd_kernel[RD(3)] = 1;                  /* pipe(2): two fds */
                 int pi = pipe_alloc();                 /* ...one buffer     */
                 if (pi >= 0) fd_pipe[RD(2)] = fd_pipe[RD(3)] = (u8)(pi + 1);
             }
-            fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0;
+            fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0; fd_watch_disk = 0;
         }
         if (step()) {
             /* Faithful userland: deliver real synchronous traps (syscalls via
@@ -257,6 +258,14 @@ int run_sys(const char *path, u64 limit, u32 sig)
                    notes above); everything else goes to the real handlers. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
                     && console_syscall(RD(9), trap_pc)) {
+                    trap_taken = 0;
+                    continue;
+                }
+                /* Raw sd0 read/write/lseek serviced from disk.img (see
+                   disk_syscall) -- the kernel's raw DMA can't reach our
+                   synthetic user buffers. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && disk_syscall(RD(9), trap_pc)) {
                     trap_taken = 0;
                     continue;
                 }
@@ -283,22 +292,36 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 {
                     fd_watch_pc = trap_pc;
                     fd_watch_pair = (RD(9) == 42);
+                    /* open()/creat() of a /dev sd0 device: the SCSI disk -- mark
+                       the returned fd so its read/write/lseek/ioctl route to
+                       disk.img.  mkfs opens the disk for writing via creat(8),
+                       not open(5), so both must check the path (arg 0). */
+                    fd_watch_disk = 0;
+                    if (RD(9) == 5 || RD(9) == 8) {
+                        char p[64];
+                        uread_str(RD(2), p, sizeof p);
+                        if (strstr(p, "sd0")) fd_watch_disk = 1;
+                    }
                     /* dup: whatever the new descriptor turns out to be, it is
                        the host's terminal exactly when the source was.  The
                        shell reads its input through a dup of fd 0, so without
                        this its `read` builtin sees EOF. */
                     fd_watch_con = (RD(9) == 41 && RD(2) < 64) ? fd_console[RD(2)] : 0;
                     fd_watch_pipe = (RD(9) == 41 && RD(2) < 64) ? fd_pipe[RD(2)] : 0;
+                    if (RD(9) == 41 && RD(2) < 64 && fd_disk[RD(2)]) fd_watch_disk = 1;
                 }
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
                     && RD(2) < 64)
-                    fd_kernel[RD(2)] = fd_console[RD(2)] = fd_pipe[RD(2)] = 0;
+                    fd_kernel[RD(2)] = fd_console[RD(2)] = fd_pipe[RD(2)] =
+                        fd_disk[RD(2)] = 0;
                 /* dup2 replaces the target outright, terminal-ness included --
                    this is how a shell redirect takes stdout off the console. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
                     && RD(9) == 90 && RD(3) < 64 && RD(2) < 64)
                     fd_console[RD(3)] = fd_console[RD(2)],
-                    fd_pipe[RD(3)] = fd_pipe[RD(2)];
+                    fd_pipe[RD(3)] = fd_pipe[RD(2)],
+                    fd_disk[RD(3)] = fd_disk[RD(2)],
+                    disk_off[RD(3)] = disk_off[RD(2)];
                 deliver_trap(trap_vector, trap_pc);
                 if (trace_traps) trace_pc_until = cpu.count + trace_len;
                 trap_taken = 0;

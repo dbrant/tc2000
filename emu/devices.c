@@ -153,6 +153,58 @@ void dev_write32(u32 a, u32 v)
     }
 }
 
+/* Factory-label the SCSI disk: if disk.img block 0 has no valid Sun disklabel,
+   write one, so newfs (which only understands "Mach" and "Sun" label styles)
+   reads a geometry it accepts instead of "Label style not understood yet".  The
+   Sun dk_label (512 bytes, big-endian): magic 0xDABE at 0x1FC, cksum at 0x1FE
+   (all 256 shorts must XOR to 0), and the fields newfs actually reads --
+   ncyl@0x1B0, nhead@0x1B4, nsect@0x1B6 -- plus the partition map dkl_map[8] at
+   0x1BC ({u32 start-cyl, u32 nblk} each; partition b == index 1). */
+void sd_ensure_label(void)
+{
+    if (!disk_img) return;
+    u8 lbl[512];
+    fseek(disk_img, 0, SEEK_SET);
+    if (fread(lbl, 1, 512, disk_img) == 512 &&
+        lbl[0x1FC] == 0xDA && lbl[0x1FD] == 0xBE)
+        return;                                       /* already labelled */
+
+    fseek(disk_img, 0, SEEK_END);
+    long sz = ftell(disk_img);
+    u16 nsect = 63, nhead = 16;
+    u32 ncyl = (u32)(sz / 512) / ((u32)nsect * nhead);
+    if (!ncyl) ncyl = 1;
+    u32 blocks = ncyl * nhead * nsect;
+
+    memset(lbl, 0, sizeof lbl);
+    snprintf((char *)lbl, 128, "BBN emulated disk cyl %u alt 0 hd %u sec %u",
+             ncyl, nhead, nsect);
+#define PUT16(o, v) do { lbl[o] = (u8)((v) >> 8); lbl[(o)+1] = (u8)(v); } while (0)
+#define PUT32(o, v) do { lbl[o] = (u8)((v) >> 24); lbl[(o)+1] = (u8)((v) >> 16); \
+                         lbl[(o)+2] = (u8)((v) >> 8); lbl[(o)+3] = (u8)(v); } while (0)
+    PUT16(0x1A4, 3600);                               /* rpm   */
+    PUT16(0x1A6, (u16)ncyl);                          /* pcyl  */
+    PUT16(0x1B0, (u16)ncyl);                          /* ncyl  */
+    PUT16(0x1B2, 0);                                  /* acyl  */
+    PUT16(0x1B4, nhead);                              /* nhead */
+    PUT16(0x1B6, nsect);                              /* nsect */
+    PUT32(0x1BC + 1 * 8 + 0, 0);                      /* b: start cylinder */
+    PUT32(0x1BC + 1 * 8 + 4, blocks);                 /* b: block count    */
+    PUT32(0x1BC + 2 * 8 + 0, 0);                      /* c: whole disk     */
+    PUT32(0x1BC + 2 * 8 + 4, blocks);
+    PUT16(0x1FC, 0xDABE);                             /* magic */
+    u16 ck = 0;
+    for (int i = 0; i < 255; i++) ck ^= (u16)((lbl[i*2] << 8) | lbl[i*2+1]);
+    PUT16(0x1FE, ck);
+#undef PUT16
+#undef PUT32
+    fseek(disk_img, 0, SEEK_SET);
+    fwrite(lbl, 1, 512, disk_img);
+    fflush(disk_img);
+    printf("disk image: wrote synthetic Sun disklabel "
+           "(%u cyl x %u hd x %u sec = %u blocks)\n", ncyl, nhead, nsect, blocks);
+}
+
 /* Stand in for the SHA completion interrupt on the _sdcommand_nowait path.
    The command block (recovered by dumping the live block at c00be6bc):
      +0x00 command/status word (0xc1 on entry; bit5 => copy DMA data out)
@@ -171,9 +223,13 @@ void sha_sdcomplete(u32 cmd)
     u32 cdbw   = mem_r32(translate(cmd + 0x70, 0));
     u32 xfer   = mem_r32(translate(cmd + 0x90, 0));
     u8  op     = (u8)(cdbw >> 24);
-    if (scsi_trace)
-        printf("[sdcmd] target=%u op=%02x dma=%08x xfer=%u @%llu\n",
-               target, op, dma, xfer, (unsigned long long)cpu.count);
+    if (scsi_trace) {
+        u32 cw2 = mem_r32(translate(cmd + 0x74, 0));
+        u32 lba = (op == 0x08 || op == 0x0a) ? (cdbw & 0x1FFFFFu)
+                                             : ((cdbw << 16) | (cw2 >> 16));
+        printf("[sdcmd] target=%u op=%02x lba=%u dma=%08x xfer=%u @%llu\n",
+               target, op, lba, dma, xfer, (unsigned long long)cpu.count);
+    }
 
     if (target != 0) return;       /* no device: leave block, driver skips */
 

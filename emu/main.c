@@ -146,8 +146,10 @@ int main(int argc, char **argv)
                     "will return zeros) -- pass --root=PATH\n", root_img_path);
         /* SCSI disk (sd0) target -- read/write, must already exist */
         disk_img = fopen(disk_img_path, "r+b");
-        if (disk_img)
+        if (disk_img) {
             printf("disk image: %s (open, rw)\n", disk_img_path);
+            sd_ensure_label();
+        }
     }
     if (mode_sys) return run_sys(path, limit, sig);
 

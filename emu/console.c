@@ -29,6 +29,80 @@ int fd_is_console(u32 fd)
     return console_io && fd < 64 && fd_console[fd];
 }
 
+/* Service raw-disk (sd0) read/write/lseek directly against emu/disk.img.
+   The kernel's raw physio DMAs to the user buffer's *kernel-pmap* physical, but
+   our synthetic user process reads through its own usegtab (a different physical
+   page), so the transferred bytes never reach it.  Rather than reconcile those
+   two mappings, service the raw device in the emulator: read/write disk.img at
+   the fd's byte offset straight into/out of the user buffer via translate() --
+   the same usegtab the process itself uses.  Returns 1 if handled. */
+int disk_syscall(u32 sysno, u32 tpc)
+{
+    u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
+    if (a0 >= 64 || !fd_disk[a0] || !disk_img) return 0;
+    long ret;
+    switch (sysno) {
+    case 19: {                                         /* lseek(fd, off, whence) */
+        long end; fseek(disk_img, 0, SEEK_END); end = ftell(disk_img);
+        if (a2 == 0)      disk_off[a0] = a1;           /* SEEK_SET */
+        else if (a2 == 1) disk_off[a0] += a1;          /* SEEK_CUR */
+        else if (a2 == 2) disk_off[a0] = (u32)end + a1;/* SEEK_END */
+        ret = (long)disk_off[a0];
+        break;
+    }
+    case 3: {                                          /* read(fd, buf, n) */
+        u8 *tmp = calloc(a2 ? a2 : 1, 1);
+        if (fseek(disk_img, (long)disk_off[a0], SEEK_SET) == 0)
+            if (fread(tmp, 1, a2, disk_img) == 0) { /* past EOF -> zeros */ }
+        for (u32 i = 0; i < a2; i++) mem_w8(translate(a1 + i, 0), tmp[i]);
+        free(tmp);
+        disk_off[a0] += a2;
+        ret = (long)a2;
+        break;
+    }
+    case 4: {                                          /* write(fd, buf, n) */
+        u8 *tmp = malloc(a2 ? a2 : 1);
+        for (u32 i = 0; i < a2; i++) tmp[i] = mem_r8(translate(a1 + i, 0));
+        if (fseek(disk_img, (long)disk_off[a0], SEEK_SET) == 0)
+            fwrite(tmp, 1, a2, disk_img), fflush(disk_img);
+        free(tmp);
+        disk_off[a0] += a2;
+        ret = (long)a2;
+        break;
+    }
+    case 54: {                                         /* ioctl */
+        /* newfs' read_label / raw block I/O ioctl (0xc014000d): a 20-byte
+           request {u32 block@0, u32 count@8 (512-byte blocks), u32 flags@0xc
+           (bit 0x01000000 => read), u32 buf@0x10}.  The kernel would physio
+           this to the user buffer's pmap-physical; service it ourselves. */
+        if (a1 != 0xC014000Du) return 0;               /* other ioctls to kernel */
+        u32 blk  = mem_r32(translate(a2 + 0x00, 0));
+        u32 cnt  = mem_r32(translate(a2 + 0x08, 0));
+        u32 flag = mem_r32(translate(a2 + 0x0c, 0));
+        u32 buf  = mem_r32(translate(a2 + 0x10, 0));
+        u32 n = cnt * 512;
+        u8 *tmp = calloc(n ? n : 1, 1);
+        if (flag & 0x01000000u) {                      /* read */
+            if (fseek(disk_img, (long)blk * 512, SEEK_SET) == 0)
+                if (fread(tmp, 1, n, disk_img) == 0) { /* EOF -> zeros */ }
+            for (u32 i = 0; i < n; i++) mem_w8(translate(buf + i, 0), tmp[i]);
+        } else {                                       /* write */
+            for (u32 i = 0; i < n; i++) tmp[i] = mem_r8(translate(buf + i, 0));
+            if (fseek(disk_img, (long)blk * 512, SEEK_SET) == 0)
+                fwrite(tmp, 1, n, disk_img), fflush(disk_img);
+        }
+        free(tmp);
+        ret = 0;
+        break;
+    }
+    default:
+        return 0;                                      /* close, etc.: to kernel */
+    }
+    WR(2, (u32)ret);
+    cpu.pc = tpc + 8;
+    return 1;
+}
+
 /* Service a syscall entirely in the emulator.  Returns 1 if handled, and
    leaves the result in r2 with the pc advanced past the error branch. */
 int console_syscall(u32 sysno, u32 tpc)

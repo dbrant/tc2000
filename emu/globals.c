@@ -189,6 +189,9 @@ u8   fd_watch_pipe;                  /* ...or a pipe                         */
 u32  con_out_bytes, con_in_bytes;
 Pipe pipes[MAX_PIPES];
 u8   fd_pipe[64];                    /* fd -> pipe index + 1 */
+u8   fd_disk[64];                    /* fd -> the raw sd0 device (routed to disk.img) */
+u32  disk_off[64];                   /* per-fd byte offset into disk.img (lseek) */
+int  fd_watch_disk;                  /* the fd-returning open was for the raw disk */
 const char *uargv[MAX_UARGV];
 const char *uenvp[MAX_UENVP];
 unsigned nuargv, nuenvp;
