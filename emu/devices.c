@@ -35,11 +35,13 @@ void memop(u32 sub, u32 D, u32 ea)
         WR(D, sub == 0x06 ? (u32)(s32)(int16_t)sha_status : sha_status);
         return;
     }
-    /* SHA command-submission "ready" register (base+0x10): _sha_cmd_wait polls
-       it for bit0 clear before writing the next command into the queue.  Our
-       SHA completes every command synchronously, so it is always ready -- report
-       bit0 clear, else the driver spins forever waiting for a doorbell ack. */
-    if (sysmode && ea == SHA_BASE + 0x10u && (sub == 0x02 || sub == 0x06)) {
+    /* SHA "busy/ready" handshake registers (base+0x08 and base+0x10): the driver
+       polls these for bit0 clear -- the controller-ready / doorbell-ack bit --
+       before submitting or advancing a command (e.g. _sha_cmd_wait at c00bc148,
+       _sha_addrs at c00bebd0).  Our SHA completes every command synchronously, so
+       it is always ready; report bit0 clear, else the driver spins forever. */
+    if (sysmode && (ea == SHA_BASE + 0x08u || ea == SHA_BASE + 0x10u)
+        && (sub == 0x02 || sub == 0x06)) {
         WR(D, mem_r16(ea) & ~1u);
         return;
     }
@@ -175,11 +177,17 @@ void sha_sdcomplete(u32 cmd)
 
     if (target != 0) return;       /* no device: leave block, driver skips */
 
-    u8 buf[256];
-    memset(buf, 0, sizeof buf);
-    u32 n = 0;
+    /* SCSI block size is 512.  disk.img size gives the capacity. */
+    static const u32 SDBLK = 512;
+    static u8 buf[0x10000];
+    u32 cdbw2 = mem_r32(translate(cmd + 0x74, 0));   /* CDB bytes 4-7 */
+    if (xfer > sizeof buf) xfer = sizeof buf;
+
     switch (op) {
-    case 0x12:                     /* INQUIRY */
+    case 0x00:                     /* TEST UNIT READY: complete good, no data */
+        return;
+    case 0x12: {                   /* INQUIRY */
+        memset(buf, 0, sizeof buf);
         buf[0] = 0x00;             /* peripheral type 0 = direct-access disk */
         buf[1] = 0x00;             /* not removable */
         buf[2] = 0x02;             /* SCSI-2 */
@@ -188,14 +196,47 @@ void sha_sdcomplete(u32 cmd)
         memcpy(buf + 8,  "BBN     ", 8);
         memcpy(buf + 16, "EMULATED DISK   ", 16);
         memcpy(buf + 32, "0001", 4);
-        n = 36;
-        break;
-    default:
-        break;                     /* other commands: just complete good */
-    }
-    if (n && dma) {
-        if (n > xfer) n = xfer;
+        u32 n = 36; if (n > xfer) n = xfer;
         for (u32 i = 0; i < n; i++) mem_w8(dma + i, buf[i]);
+        return;
+    }
+    case 0x08:                     /* READ(6):  LBA in CDB[1..3] (21 bits) */
+    case 0x28: {                   /* READ(10): LBA in CDB[2..5] (32 bits) */
+        u32 lba = (op == 0x08) ? (cdbw & 0x1FFFFFu)
+                               : ((cdbw << 16) | (cdbw2 >> 16));
+        memset(buf, 0, xfer);
+        if (disk_img && dma) {
+            if (fseek(disk_img, (long)lba * SDBLK, SEEK_SET) == 0)
+                if (fread(buf, 1, xfer, disk_img) == 0) { /* blank tail -> zeros */ }
+        }
+        if (dma) for (u32 i = 0; i < xfer; i++) mem_w8(dma + i, buf[i]);
+        return;
+    }
+    case 0x0a:                     /* WRITE(6) */
+    case 0x2a: {                   /* WRITE(10) */
+        u32 lba = (op == 0x0a) ? (cdbw & 0x1FFFFFu)
+                               : ((cdbw << 16) | (cdbw2 >> 16));
+        if (disk_img && dma) {
+            for (u32 i = 0; i < xfer; i++) buf[i] = mem_r8(dma + i);
+            if (fseek(disk_img, (long)lba * SDBLK, SEEK_SET) == 0)
+                fwrite(buf, 1, xfer, disk_img), fflush(disk_img);
+        }
+        return;
+    }
+    case 0x25: {                   /* READ CAPACITY: last LBA (BE) + block size */
+        long sz = 0;
+        if (disk_img) { fseek(disk_img, 0, SEEK_END); sz = ftell(disk_img); }
+        u32 last = sz ? (u32)(sz / SDBLK - 1) : 0x3FFFF;   /* ~128MB fallback */
+        if (dma) {
+            mem_w8(dma+0, last>>24); mem_w8(dma+1, last>>16);
+            mem_w8(dma+2, last>>8);  mem_w8(dma+3, last);
+            mem_w8(dma+4, 0); mem_w8(dma+5, 0);
+            mem_w8(dma+6, SDBLK>>8); mem_w8(dma+7, SDBLK & 0xff);
+        }
+        return;
+    }
+    default:
+        return;                    /* other commands: just complete good */
     }
 }
 

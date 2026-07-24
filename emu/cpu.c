@@ -162,6 +162,71 @@ int step(void)
         return 0;
     }
 
+    /* A third SHA completion-wait shape: a poll loop (e.g. c00bc134-c00bc16c)
+       spins on the command block's completion flag [r27+0x68] bit0, sleeping via
+       _slaves_remaining between reads, waiting for the interrupt handler to set
+       it.  On the first poll with the bit clear, stand in for the completion:
+       execute the SCSI command and set the flag so the loop exits. */
+    if (sha_sync && sysmode && pc == 0xC00BC148u) {
+        u32 pa = translate(RD(27) + 0x68, 0);
+        if (!(mem_r32(pa) & 1u)) {
+            sha_sdcomplete(RD(27));
+            mem_w32(pa, mem_r32(pa) | 1u);
+        }
+    }
+    /* _cause_tlbflush (c00a7994) is a cross-CPU TLB shootdown: it spins at
+       c00a79e4 waiting for the per-node ack counter [r8] (vv(0xc0014040)) to
+       reach r27 = the number of CPUs that must acknowledge.  On our single CPU
+       no other processor ever bumps it, so newfs (which flushes when it maps the
+       raw disk buffers) hangs here.  A uniprocessor flush is local and instant --
+       force the counter to the target so the wait completes immediately. */
+    if (sysmode && pc == 0xC00A79E4u) {
+        u32 pa = translate(RD(8), 0);
+        if (mem_r32(pa) < RD(27)) mem_w32(pa, RD(27));
+    }
+
+    /* _copy_out_buffer (c00be4c0): a scatter-gather DMA loop that issues
+       _multphysio per SG segment and waits at tsleep (c0054a64, return c00be520)
+       for the segment -- a REAL sleep just past the SHA tsleep-intercept range,
+       so it panics `sleep_and_unlock` in idle context.  Stand in for the SG
+       completion: run the SCSI transfer and set the in-progress marker
+       [r27+0x24] (0xffff => keep looping) to 0 so the loop exits, then return
+       from the sleep without switching. */
+    if (sha_sync && sysmode && pc == TSLEEP_ENTRY && RD(1) == 0xC00BE520u) {
+        sha_sdcomplete(RD(27));
+        mem_w16(translate(RD(27) + 0x24, 0), 0);
+        if (RD(4) >= 0xC0000000u && RD(4) < 0xE0000000u)
+            mem_w32(translate(RD(4), 0), 0);
+        cpu.pc = RD(1);
+        WR(2, 0);
+        return 0;
+    }
+
+    /* b2vme slave-map allocator (c00adc5c): pops a VME-window entry off a tiny
+       per-node free list (head at vv(0xc0014080), chain table at 0xf4000800),
+       panicking `vme_slave_map_alloc: node %d` when the head hits the 0x1ff
+       exhausted-sentinel.  The real driver frees each window after its DMA
+       completes (via the interrupt), replenishing the list; we complete every
+       DMA synchronously, so no window is ever in flight and the pool can be
+       recycled freely.  When the head is exhausted, reset it to entry 0 so the
+       (preserved) chain hands out entries 0,1 again. */
+    if (sysmode && pc == 0xC00ADCE0u) {
+        u32 pa = translate(RD(24), 0);
+        if ((mem_r32(pa) & 0x1FFu) == 0x1FFu) mem_w32(pa, 0);
+    }
+
+    /* _sha_cmd_wait (c00bd498) waits for a free SHA command-QUEUE SLOT before
+       writing the next command: it polls the slot halfword (r1 = SHA dual-port
+       base+0x1c + idx*0xc) for bit0 CLEAR.  The controller clears that bit when
+       it finishes a slot's command; we complete commands synchronously but never
+       ran the interrupt that frees the slot, so the queue fills and sdprobe
+       stalls at target 4/5.  Free the slot here so the driver can reuse it. */
+    if (sha_sync && sysmode && pc == 0xC00BD498u) {
+        u32 pa = translate(RD(1), 0);
+        u16 v = mem_r16(pa);
+        if (v & 1u) mem_w16(pa, v & ~1u);
+    }
+
     /* Disk strategy.  Satisfying I/O at the biowait below covers only the
        SYNCHRONOUS case, and the buffer cache does not read that way for long:
        a sequential read issues a B_ASYNC read-ahead, whose completion is

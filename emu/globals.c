@@ -161,6 +161,10 @@ int skip_synchrtc = 1;         /* skip meaningless cross-node RTC sync */
    target.  Reads issued by the buffer cache are satisfied from this file. */
 const char *root_img_path = "../tapeimage.img";
 FILE *root_img;
+/* SCSI disk (sd0 = the install target) backing.  The SHA target-0 model routes
+   READ/WRITE block I/O here; blank at first, newfs populates it. */
+const char *disk_img_path = "disk.img";
+FILE *disk_img;
 FILE *fds[64];
 int   next_fd = 3;
 int   exited = -1;

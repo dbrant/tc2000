@@ -212,6 +212,8 @@ extern int biowait_sync ;
 extern int skip_synchrtc ;
 extern const char *root_img_path ;
 extern FILE *root_img;
+extern const char *disk_img_path ;
+extern FILE *disk_img;
 extern FILE *fds[];
 extern int next_fd ;
 extern int exited ;
