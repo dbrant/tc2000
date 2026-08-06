@@ -36,7 +36,9 @@ Defaults: the **real-memory model** (the default) with translation and EEPROM
 signature `'A'`.  `--identity` selects the superseded identity+fallback path.
 Useful flags: `--scsi` (configure the SCSI disk / enable the sd0 path),
 `--scsitrace`, `--clock`, `--pchist` (dump the last 64K PCs at halt — the tool
-that cracked several blockers), `--watch=PC`, `--root=PATH`, `--nodes=N`.
+that cracked several blockers), `--watch=PC`, `--nodes=N`, and the two image
+paths `--tape=PATH` (root filesystem / tape UFS; default `<vmunix-dir>.img`) and
+`--disk=PATH` (SCSI sd0 install target; default `disk.img`).
 
 ### The kernel's own boot messages — `--kmsg`
 

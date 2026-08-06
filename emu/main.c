@@ -23,7 +23,8 @@ int main(int argc, char **argv)
         if      (!strncmp(argv[i], "--limit=", 8)) limit = strtoull(argv[i] + 8, 0, 0);
         else if (!strncmp(argv[i], "--sig=", 6))   sig = (u32)(u8)argv[i][6];
         else if (!strncmp(argv[i], "--nodes=", 8)) cfg_nodes = (u32)strtoul(argv[i]+8,0,0);
-        else if (!strncmp(argv[i], "--root=", 7))  root_img_path = argv[i]+7;
+        else if (!strncmp(argv[i], "--tape=", 7))  root_img_path = argv[i]+7;
+        else if (!strncmp(argv[i], "--disk=", 7))  disk_img_path = argv[i]+7;
         else if (!strcmp(argv[i], "--scsi"))       sha_desc_clear = 0x14;
         else if (!strcmp(argv[i], "--identity"))   identity_mode = 1;
         else if (!strcmp(argv[i], "--clock"))      clock_irq = 1;
@@ -59,6 +60,10 @@ int main(int argc, char **argv)
                 "usage: nx88 user <binary> [args...] [-v] [--limit=N]\n"
                 "       nx88 sys  <vmunix> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
                 "                          [--nodes=N] [--identity]\n"
+                "                          [--tape=PATH] [--disk=PATH]\n"
+                "  --tape=PATH  root filesystem image (the tape's UFS; default:\n"
+                "               <vmunix-dir>.img, e.g. .../tapeimage.img)\n"
+                "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
                 "  sys mode defaults to the real-memory model with EEPROM signature\n"
                 "  'A'; pass --identity for the superseded identity path.\n");
         return 2;
@@ -70,7 +75,7 @@ int main(int argc, char **argv)
         ileave_stub  = 1;
         realmm = !identity_mode;
         /* Open the root filesystem image (the tape's UFS) for disk reads.
-           If --root wasn't given, derive it from the vmunix path: vmunix lives
+           If --tape wasn't given, derive it from the vmunix path: vmunix lives
            at <tapedir>/vmunix and the tape image is its sibling <tapedir>.img
            (e.g. .../tapeimage/vmunix -> .../tapeimage.img). */
         static char derived[1024], gr[1024];
@@ -113,7 +118,7 @@ int main(int argc, char **argv)
             printf("root image: %s (open)\n", root_img_path);
         else
             fprintf(stderr, "root image: %s could not be opened (disk reads "
-                    "will return zeros) -- pass --root=PATH\n", root_img_path);
+                    "will return zeros) -- pass --tape=PATH\n", root_img_path);
         /* SCSI disk (sd0) target -- read/write, must already exist */
         disk_img = fopen(disk_img_path, "r+b");
         if (disk_img) {
