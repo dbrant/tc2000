@@ -165,6 +165,10 @@ FILE *root_img;
    READ/WRITE block I/O here; blank at first, newfs populates it. */
 const char *disk_img_path = "disk.img";
 FILE *disk_img;
+/* The buffer's device pointer (struct buf +0x50) identifies which disk a
+   buffer-cache read/write is for.  The first one seen during boot is the root
+   device (the tape); any other is the SCSI disk (disk.img). */
+u32  root_dev_vp;
 FILE *fds[64];
 int   next_fd = 3;
 int   exited = -1;

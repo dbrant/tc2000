@@ -246,20 +246,34 @@ int step(void)
             u32 bcount = mem_r32(translate(buf + 0x14, 0));
             u32 addr   = mem_r32(translate(buf + 0x3c, 0));
             u32 blkno  = mem_r32(translate(buf + 0x40, 0));
-            if (root_img && (flags & 1u) && addr >= 0xC0000000u
-                && bcount && bcount <= 0x10000u) {
+            /* Route by device: the root device (first seen, the tape) reads from
+               root_img; any other block device (the SCSI disk) uses disk.img. */
+            u32 vp = mem_r32(translate(buf + 0x50, 0));
+            if (!root_dev_vp) root_dev_vp = vp;
+            int is_root = (vp == root_dev_vp);
+            FILE *dev = is_root ? root_img : disk_img;
+            if (dev && addr >= 0xC0000000u && bcount && bcount <= 0x10000u) {
                 u8 tmp[0x10000];
-                if (fseek(root_img, (long)blkno * 512, SEEK_SET) == 0) {
-                    size_t got = fread(tmp, 1, bcount, root_img);
-                    for (size_t k = got; k < bcount; k++) tmp[k] = 0;
-                    for (u32 k = 0; k < bcount; k += 4)
-                        mem_w32(translate(addr + k, 0), be32(tmp + k));
+                if (flags & 1u) {                       /* read */
+                    if (fseek(dev, (long)blkno * 512, SEEK_SET) == 0) {
+                        size_t got = fread(tmp, 1, bcount, dev);
+                        for (size_t k = got; k < bcount; k++) tmp[k] = 0;
+                        for (u32 k = 0; k < bcount; k += 4)
+                            mem_w32(translate(addr + k, 0), be32(tmp + k));
+                    }
+                } else if (!is_root) {                  /* write-back to disk */
+                    for (u32 k = 0; k < bcount; k += 4) {
+                        u32 w = mem_r32(translate(addr + k, 0));
+                        tmp[k]=w>>24; tmp[k+1]=w>>16; tmp[k+2]=w>>8; tmp[k+3]=w;
+                    }
+                    if (fseek(dev, (long)blkno * 512, SEEK_SET) == 0)
+                        fwrite(tmp, 1, bcount, dev), fflush(dev);
                 }
             }
             if (scsi_trace)
-                printf("[%s] buf=%08x flags=%08x blk=%u bcount=%u addr=%08x @%llu\n",
-                       pc == SDSTRATEGY ? "strategy" : "getblk-stuck",
-                       buf, flags, blkno, bcount, addr,
+                printf("[%s-%s] buf=%08x flags=%08x blk=%u bcount=%u addr=%08x @%llu\n",
+                       pc == SDSTRATEGY ? "strategy" : "getblk",
+                       is_root ? "root" : "sd0", buf, flags, blkno, bcount, addr,
                        (unsigned long long)cpu.count);
             if (pc != SDSTRATEGY) {
                 /* Standing in for the completion interrupt getblk is waiting
@@ -295,18 +309,33 @@ int step(void)
             u32 addr   = mem_r32(translate(buf + 0x3c, 0));
             u32 blkno  = mem_r32(translate(buf + 0x40, 0));
             int is_read = (flags & 1u);             /* B_READ = 0x01 */
-            if (root_img && is_read && addr >= 0xC0000000u
-                && bcount && bcount <= 0x10000u) {
+            /* Route by device (buf +0x50): root device -> tape (read-only);
+               the SCSI disk -> disk.img (read AND write-back). */
+            u32 vp = mem_r32(translate(buf + 0x50, 0));
+            if (!root_dev_vp) root_dev_vp = vp;
+            int is_root = (vp == root_dev_vp);
+            FILE *dev = is_root ? root_img : disk_img;
+            if (dev && addr >= 0xC0000000u && bcount && bcount <= 0x10000u) {
                 u8 tmp[0x10000];
-                if (fseek(root_img, (long)blkno * 512, SEEK_SET) == 0) {
-                    size_t got = fread(tmp, 1, bcount, root_img);
-                    for (size_t k = got; k < bcount; k++) tmp[k] = 0;
-                    for (u32 k = 0; k < bcount; k += 4)
-                        mem_w32(translate(addr + k, 0), be32(tmp + k));
-                    if (scsi_trace)
-                        printf("[diskread] blk=%u (off=0x%lx) bcount=%u -> %08x got=%zu\n",
-                               blkno, (long)blkno * 512, bcount, addr, got);
+                if (is_read) {
+                    if (fseek(dev, (long)blkno * 512, SEEK_SET) == 0) {
+                        size_t got = fread(tmp, 1, bcount, dev);
+                        for (size_t k = got; k < bcount; k++) tmp[k] = 0;
+                        for (u32 k = 0; k < bcount; k += 4)
+                            mem_w32(translate(addr + k, 0), be32(tmp + k));
+                    }
+                } else if (!is_root) {              /* write-back to the disk */
+                    for (u32 k = 0; k < bcount; k += 4) {
+                        u32 w = mem_r32(translate(addr + k, 0));
+                        tmp[k]=w>>24; tmp[k+1]=w>>16; tmp[k+2]=w>>8; tmp[k+3]=w;
+                    }
+                    if (fseek(dev, (long)blkno * 512, SEEK_SET) == 0)
+                        fwrite(tmp, 1, bcount, dev), fflush(dev);
                 }
+                if (scsi_trace)
+                    printf("[bio-%s] %s blk=%u bcount=%u addr=%08x\n",
+                           is_read ? "rd" : "wr", is_root ? "root" : "sd0",
+                           blkno, bcount, addr);
             }
             u32 pa = translate(buf, 0);
             mem_w32(pa, mem_r32(pa) | 2u);         /* set B_DONE (bit 1) */

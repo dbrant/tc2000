@@ -214,6 +214,7 @@ extern const char *root_img_path ;
 extern FILE *root_img;
 extern const char *disk_img_path ;
 extern FILE *disk_img;
+extern u32 root_dev_vp;
 extern FILE *fds[];
 extern int next_fd ;
 extern int exited ;
