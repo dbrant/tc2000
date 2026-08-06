@@ -106,9 +106,6 @@ void tcs_poke(u32 a)
     if (a != tcs_mbox_pa) return;
     u8 cmd = mem_r8(tcs_mbox_pa);
     if (!cmd) return;
-    if (tcs_trace)
-        printf("[tcs] command %02x (args %08x %08x) -> ok\n", cmd,
-               mem_r32(tcs_mbox_pa + 0x10), mem_r32(tcs_mbox_pa + 0x14));
     mem_w8(tcs_mbox_pa, 0);         /* consumed */
     mem_w8(tcs_mbox_pa + 5, 1);     /* response ready, no error */
     tcs_commands++;
@@ -127,11 +124,6 @@ int cmmu_base_of(u32 a, u32 *base)
 void dev_write32(u32 a, u32 v)
 {
     if (sysmode) {
-        {
-            u32 cb;
-            if (batc_trace && cmmu_base_of(a, &cb) && (a - cb) >= 0x400 && (a - cb) < 0x500)
-                printf("[batc] %08x off=0x%x <- %08x\n", a, a - cb, v);
-        }
         if (a == CMRAM_SELECT) { cmram_sel = v; return; }
         if (a == CMRAM_DATA) { cmram_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
         if (a == IRQ_SOURCE_REG) { irq_source = v; return; } /* ack clears src */
@@ -143,12 +135,8 @@ void dev_write32(u32 a, u32 v)
         if (cmmu_base_of(a, &base)) {
             u32 off = a - base;
             if (off == CMMU_SCR) cmmu_command(base, v);
-            else if (off == CMMU_SAPR || off == CMMU_UAPR) {
+            else if (off == CMMU_SAPR || off == CMMU_UAPR)
                 tlb_flush();             /* APR changed: drop cached translations */
-                if (mmu_trace)
-                    printf("[cmmu] %08x %s <- %08x   (pc=%08x)\n", base,
-                           off == CMMU_SAPR ? "SAPR" : "UAPR", v, cpu.pc);
-            }
         }
     }
 }

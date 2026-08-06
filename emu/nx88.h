@@ -51,8 +51,6 @@ typedef uint64_t u64;
 #define VV_STRIDE  0x2000u
 #define VV_TEMPLATE 0xC0014000u
 #define TIMER_ADDR 0xE07E8018u
-#define LOG_ROUTINE     0xC005A85Cu
-#define PRINTF_THROTTLE 0xC005A9D0u
 #define KERN_PUTCHAR    0xC005B218u   /* subr_prf.o putchar(c, ...) */
 #define SDSTRATEGY      0xC00BAFE4u   /* sd.o strategy(bp)          */
 #define BIODONE         0xC0074138u   /* bio.o biodone(bp)          */
@@ -139,14 +137,9 @@ enum { C_EQ = 2, C_NE = 3, C_GT = 4, C_LE = 5, C_LT = 6,
 /* ---- globals ---- */
 extern u8 **pages;
 extern int realmm;
-extern int dbg_trans;
-extern u64 pcsample;
 extern int scsi_trace, scsi_trace_n;
 extern u32 irq_source;
 extern u16 sha_status;
-extern u32 wmem_addr;
-extern u32 wval;
-extern u32 wmem_lo, wmem_hi;
 extern u64 dbg_count;
 extern u32 dbg_pc;
 extern CPU cpu;
@@ -160,51 +153,35 @@ extern u32 sha_desc_clear ;
 extern const u8 memop_scale[] ;
 extern u32 force_sig_pc;
 extern u32 force_sig_val;
-extern int log_msgs;
 extern u32 cmmu_present[] ;
 extern int n_cmmu ;
 extern u32 cmram_sel;
 extern u64 cmram_reads, cmram_writes;
 extern u8 **cmram_pages;
-extern int mmu_trace;
-extern int lct_trace;
-extern int realu;
-extern u32 cur_u98;
-void lctx_switch(u32 ctx);
-extern int batc_trace;
-extern u32 dump_addr;
-extern u32 findpt_va;
 extern u32 watch_pc;
 extern int dump_pchist;
-extern int dump_uarea;
 extern int quiet_uproc;
 extern int interactive;
 extern int kmsgs;
-extern int brk_passthru;
 extern u32 brk_watch_pc, brk_watch_arg;
 extern u32 last_sleep_chan, last_sleep_from;
 extern u64 trace_len ;
 extern u32 cfg_nodes;
-extern int uland_probe;
 extern int deliver_traps;
 extern int trace_traps;
 extern u64 trace_pc_until;
-extern u32 utrap_vec ;
 extern const char *uprog_path;
 extern u64 probe_hits, probe_misses;
 extern int synth_boot ;
 extern u32 ptpool_next ;
-extern u32 seed_mapper;
 extern u32 fl_stride ;
 extern u32 tcs_mbox_pa ;
 extern u64 tcs_commands;
-extern int tcs_trace;
 extern int ileave_stub;
 extern u64 ileave_redirects;
 extern int translate_on;
 extern u64 xlat_faults;
 extern u32 last_fault_va, last_fault_pc;
-extern u32 xva;
 extern int clock_irq;
 extern u64 clock_period , next_clock;
 extern int sha_sync ;
@@ -286,9 +263,6 @@ static inline u8 mem_r8(u32 a) { return page_of(a)[a & 4095]; }
 
 static inline void mem_w8(u32 a, u8 v)
 {
-    if (wmem_addr && (a >= (wmem_addr & ~3u) && a < (wmem_addr & ~3u) + 4))
-        printf("[wmem8] %08x <- %02x  pc=%08x @%llu\n", a, v, dbg_pc,
-               (unsigned long long)dbg_count);
     page_of(a)[a & 4095] = v;
 }
 
@@ -304,12 +278,6 @@ static inline u32 mem_r32(u32 a)
 
 static inline void mem_w32(u32 a, u32 v)
 {
-    if (wmem_addr && a == wmem_addr)
-        printf("[wmem] %08x <- %08x  pc=%08x @%llu\n", a, v, dbg_pc,
-               (unsigned long long)dbg_count);
-    if (wmem_hi && a >= wmem_lo && a < wmem_hi)
-        printf("[wrange] %08x <- %08x  pc=%08x @%llu\n", a, v, dbg_pc,
-               (unsigned long long)dbg_count);
     if ((a & 4095) <= 4092) {
         u8 *p = page_of(a) + (a & 4095);
         p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
@@ -323,9 +291,6 @@ static inline u16 mem_r16(u32 a) { return ((u16)mem_r8(a) << 8) | mem_r8(a+1); }
 
 static inline void mem_w16(u32 a, u16 v)
 {
-    if (wmem_addr && (a == wmem_addr || a + 1 == wmem_addr || a == wmem_addr + 2))
-        printf("[wmem16] %08x <- %04x  pc=%08x @%llu\n", a, v, dbg_pc,
-               (unsigned long long)dbg_count);
     mem_w8(a, v >> 8); mem_w8(a+1, v);
 }
 

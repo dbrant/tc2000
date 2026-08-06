@@ -32,24 +32,18 @@ The emulator is split by theme across a dozen small `.c` files plus a shared
 and configuration flags live in `globals.c`; each other file holds one
 subsystem's behaviour.
 
-Defaults: the **real-memory model** (`--realmm`) with translation and EEPROM signature `'A'`.
-`--identity` selects the superseded identity+fallback path. Useful flags: `--log`,
-`--scsitrace`, `--clock`, `--pcsample=N`, `--pchist` (dump the last 64K PCs at halt —
-the tool that cracked several blockers), `--watch=PC`, `--root=PATH`, `--nodes=N`.
-
-`--realu` (experimental, opt-in) virtualizes the per-process kernel u-area at the
-kernel's own `load_context` switches (`--lct` traces them), giving each process
-its own kernel-stack page instead of the one shared identity window. It clears
-the `--scsi` SCSI-probe `procdup` derail so the probe advances to the SHA
-re-probe; it is **not** default because it currently regresses the plain boot's
-root mount (the mount's fork children still pass state through a shared stack).
+Defaults: the **real-memory model** (the default) with translation and EEPROM
+signature `'A'`.  `--identity` selects the superseded identity+fallback path.
+Useful flags: `--scsi` (configure the SCSI disk / enable the sd0 path),
+`--scsitrace`, `--clock`, `--pchist` (dump the last 64K PCs at halt — the tool
+that cracked several blockers), `--watch=PC`, `--root=PATH`, `--nodes=N`.
 
 ### The kernel's own boot messages — `--kmsg`
 
 `--kmsg` prints everything the kernel says, formatted by the kernel itself. It
 hooks `putchar` in `subr_prf.o` (`0xC005B218`), the funnel every `printf`
 character passes through, rather than reconstructing messages from format
-strings the way the older `--log` does. Combines with anything:
+strings. Combines with anything:
 
 ```sh
 ./nx88.exe sys <path-to>/tapeimage/vmunix --shell --kmsg

@@ -160,93 +160,6 @@ void uarea_dup_files(void)
     }
 }
 
-/* --------------------------------------------------------------------------
-   Per-process u-area virtualization for the kernel's OWN context switches.
-
-   The u-area lives behind a fixed kernel VA window: the struct at 0xFBFFE000
-   (curproc, u_ofile, ...) and the kernel stack at 0xFBFFD000, double-mapped by
-   load_context into [0xFBFFC000, 0xFC000000).  On real hardware load_context
-   (_local_phys_pte_page, c0017498) rewrites the per-node page-table slot so the
-   window's two physical pages become the incoming process's own u-area pages
-   (named in ctx+0x98).  Our translate() short-circuits that whole window to
-   identity, so every process shares one physical u-area -- which is why a
-   process switched out mid-kernel-call (e.g. the SCSI probe parked in procdup)
-   resumes on a kernel stack that intervening processes have overwritten, reads
-   a zero return address at [r31+0x11c], and jumps to 0.
-
-   We virtualize the window instead of remapping it: at each load_context we
-   save the outgoing process's window content into a slot keyed by its u98 and
-   restore the incoming one's.  The physical ctx+0x98 pages are never written by
-   the kernel in our model (its u-area writes all land in the identity window),
-   so they can't serve as storage -- hence the side table.  A u98 we have never
-   seen is a freshly forked child: we leave the window untouched so it inherits
-   the parent's just-copied kernel stack, exactly as the shared-window model
-   already (accidentally) did correctly for children. */
-/* Virtualize only the kernel-STACK page (0xFBFFD000).  The struct page at
-   0xFBFFE000 (curproc, u_ofile, ...) is kept shared/identity: the kernel writes
-   curproc explicitly on every switch, and the rest of the emulator already
-   treats that page as the live u-area, so swapping it per-process instead breaks
-   the root-mount path.  The derail we are fixing is purely a stale kernel stack
-   ([r31+0x11c] read back as 0), which lives entirely on the stack page. */
-#define UWIN_VA   0xFBFFD000u
-#define UWIN_SIZE 0x1000u
-#define MAX_USLOT 512
-static struct uslot { u32 u98; u8 data[UWIN_SIZE]; } uslot[MAX_USLOT];
-static int nuslot;
-u32 cur_u98;
-
-static int uslot_find(u32 u98)
-{
-    for (int i = 0; i < nuslot; i++) if (uslot[i].u98 == u98) return i;
-    return -1;
-}
-
-static int uslot_get(u32 u98)
-{
-    int s = uslot_find(u98);
-    if (s >= 0) return s;
-    if (nuslot >= MAX_USLOT) return -1;         /* table full: drop the save */
-    uslot[nuslot].u98 = u98;
-    return nuslot++;
-}
-
-static void uwin_save(u8 *dst)
-{
-    for (u32 i = 0; i < UWIN_SIZE; i += 4)
-        *(u32 *)(dst + i) = mem_r32(UWIN_VA + i);
-}
-
-static void uwin_load(const u8 *src)
-{
-    for (u32 i = 0; i < UWIN_SIZE; i += 4)
-        mem_w32(UWIN_VA + i, *(const u32 *)(src + i));
-}
-
-/* Called at load_context entry (pc == 0xc0017498) with the incoming context. */
-void lctx_switch(u32 ctx)
-{
-    if (!realu) return;
-    u32 new98 = mem_r32(translate(ctx + 0x98, 0));
-    if (!new98 || new98 == cur_u98) return;
-    if (cur_u98) {                              /* bank the outgoing process   */
-        int s = uslot_get(cur_u98);
-        if (s >= 0) uwin_save(uslot[s].data);
-    }
-    int s = uslot_find(new98);
-    if (s >= 0) uwin_load(uslot[s].data);       /* restore a known process...  */
-    /* ...otherwise leave the window: a new child inherits the parent's stack. */
-    cur_u98 = new98;
-    if (lct_trace) {
-        u32 node = mem_r32(translate(0xc0014008u, 0)) & 0xFFFFu;
-        u32 pteaddr = mem_r32(translate(0xc1015548u + node * 4, 0));
-        u32 old98 = pteaddr ? (mem_r32(translate(pteaddr, 0)) & 0xFFFFF000u) : 0;
-        printf("[lct] switch->u98=%08x rpc=%08x (%s, %d slots) pte_old98=%08x @%llu\n",
-               new98, mem_r32(translate(ctx + 0x80, 0)),
-               s >= 0 ? "restored" : "inherited", nuslot, old98,
-               (unsigned long long)cpu.count);
-    }
-}
-
 void uarea_save(UProc *u)
 {
     for (u32 i = 0; i < UAREA_SIZE; i++) u->uarea[i] = mem_r8(UAREA_VA + i);
@@ -346,7 +259,7 @@ int uproc_syscall(u32 sysno, u32 tpc)
     case 17:
         /* ...except the bootstrap stub's one real obreak, which is how the
            kernel learns the data segment is big enough for useracc. */
-        if (brk_passthru || (tpc & ~0xFFFu) == UBOOT_VA) {
+        if ((tpc & ~0xFFFu) == UBOOT_VA) {
             brk_watch_pc = tpc; brk_watch_arg = a0;
             return 0;
         }
@@ -401,18 +314,6 @@ int uproc_syscall(u32 sysno, u32 tpc)
         WR(31, sp);
         cpu.pc = entry;
         uproc_activate(fresh);
-        if (dump_uarea) {
-            printf("[uarea] u-area +0x730..+0x790:\n");
-            for (u32 o = 0x730; o < 0x790; o += 4)
-                printf("   +%04x = %08x\n", o, mem_r32(UAREA_VA + o));
-            for (int k = 0; k < 3; k++) {
-                u32 f = mem_r32(UAREA_VA + 0x748 + 4 * k);
-                printf("[uarea] file[%d] @%08x:", k, f);
-                for (u32 o = 0; o < 0x3c; o += 4)
-                    printf(" %08x", mem_r32(translate(f + o, 0)));
-                printf("\n");
-            }
-        }
         return 1;
     }
 
@@ -588,18 +489,15 @@ void launch_utest(void)
     u32 codepa  = upool_alloc();
     u32 stackpa = upool_alloc();
     u32 uva = 0x1000u;
-    /* getpid (syscall 20), then spin at the error and success return points */
-    /* Syscall trap vector = 128, exactly as nX user binaries issue it
-       (`or r9,r0,N; tb0 0,r0,128`; see ../tapeimage/bin/echo).  Vector 0x73
-       (_Xsyscall) is a separate trap whose trap() case just runs the exception
-       exit path.  --utrap=N overrides for experiments. */
+    /* getpid (syscall 20), then spin at the error and success return points.
+       Syscall trap vector = 128, exactly as nX user binaries issue it
+       (`or r9,r0,N; tb0 0,r0,128`; see ../tapeimage/bin/echo). */
     static u32 prog[] = {
         0x59200014u,   /* or  r9, r0, 20   ; getpid            */
-        0xf000d073u,   /* tb0 0, r0, 0x73  ; syscall trap      */
+        0xf000d080u,   /* tb0 0, r0, 128   ; syscall trap      */
         0xc0000000u,   /* br  .            ; error   (pc+4)    */
         0xc0000000u,   /* br  .            ; success (pc+8)    */
     };
-    prog[1] = 0xf000d000u | (utrap_vec & 0x1FFu);
     for (unsigned i = 0; i < sizeof prog / 4; i++) mem_w32(codepa + i * 4, prog[i]);
     umap(segtab, uva, codepa);
     umap(segtab, 0xE000u, stackpa);

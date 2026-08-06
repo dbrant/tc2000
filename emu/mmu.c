@@ -69,7 +69,6 @@ void boot_build_tables(void)
         mem_w32(cmmu_present[i] + CMMU_SAPR, tab | 1);
         mem_w32(cmmu_present[i] + CMMU_UAPR, DATA_SEGTAB | 1);
     }
-    if (seed_mapper) mem_w32(0xC0014038u, seed_mapper);
     printf("synthetic boot: %s map, tables at %08x (code) / %08x (data), "
            "%u page tables\n", realmm ? "direct(VA-0xC0000000)" : "identity",
            CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
@@ -139,10 +138,7 @@ int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
 void cmmu_command(u32 base, u32 cmd)
 {
     /* 0x20/0x24 are the user/supervisor address-probe commands */
-    if (cmd != 0x20 && cmd != 0x24) {
-        if (mmu_trace) printf("[cmmu] %08x: unhandled command %02x\n", base, cmd);
-        return;
-    }
+    if (cmd != 0x20 && cmd != 0x24) return;
     u32 vaddr = mem_r32(base + CMMU_SAR);
     u32 apr   = mem_r32(base + (cmd == 0x24 ? CMMU_SAPR : CMMU_UAPR));
     int is_code = (base == 0xFFF7F000u);
@@ -160,12 +156,10 @@ void cmmu_command(u32 base, u32 cmd)
         mem_w32(base + CMMU_SSR, 1);                  /* bit 0 = valid */
         mem_w32(base + CMMU_SAR, phys);
         probe_hits++;
-        if (mmu_trace) printf("[cmmu] probe %08x -> %08x (apr %08x)\n", vaddr, phys, apr);
     } else {
         mem_w32(base + CMMU_SSR, 0);
         mem_w32(base + CMMU_PFAR, vaddr);
         probe_misses++;
-        if (mmu_trace) printf("[cmmu] probe %08x MISS (apr %08x)\n", vaddr, apr);
     }
 }
 
@@ -207,12 +201,6 @@ u32 translate(u32 va, int code)
     /* walk_fb: kernel's table, then (realmm) the synthetic direct-map table
        which supplies node-correct physical addresses for kernel memory */
     u32 pa;
-    if (xva && (va & ~0xFFFu) == (xva & ~0xFFFu)) {
-        u32 tp; int ok = walk_fb(apr, va, code, &tp);
-        printf("[xva] %08x -> %s pa=%08x apr=%08x pc=%08x @%llu\n",
-               va, ok ? "ok" : "MISS", ok ? tp : 0, apr, cpu.pc,
-               (unsigned long long)dbg_count);
-    }
     if (!walk_fb(apr, va, code, &pa)) {
         /* Demand paging for our synthetic user space.  The kernel's VM has no
            idea this address space exists, so a real vector-2 fault would find

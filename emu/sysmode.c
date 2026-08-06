@@ -48,12 +48,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
        interrupt handlers are up, which is when clock delivery may begin. */
     cpu.cr[1] = 0x80000003u;
 
-    /* Kernel message capture.  subr_prf.o's formatter is reached two ways:
-       log(tag, fmt, ...) at LOG_ROUTINE, and printf_throttle(fmt, args)
-       called directly by the panic path.  Hooking both shows everything the
-       kernel tries to say, without needing a working console device. */
     clock_t t0 = clock();
-    u32 last_fmt = 0;
     u32 last_kpc = cpu.pc;
     /* PC ring buffer: the last PCH_N program counters, for post-mortem tracing
        of the crash/halt sequence.  Cheap enough to keep always on. */
@@ -86,8 +81,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
            (proc0 can't actually sleep -- it's still on the run queue -- so
            without this catcher it would crash into doadump; stop cleanly here
            and report the milestone instead.) */
-        if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u
-            && !uland_probe) {
+        if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u) {
             if (kmsgs) kmsg_flush();
             printf("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
@@ -151,9 +145,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
         if (trace_pc_until && cpu.count < trace_pc_until)
             printf("[pctrace] %08x\n", cpu.pc);
         last_kpc = cpu.pc;
-        if (pcsample && (cpu.count % pcsample) == 0)
-            printf("[pc] @%llu pc=%08x\n",
-                   (unsigned long long)cpu.count, cpu.pc);
         /* Kernel console output.  subr_prf.o funnels every character printf
            produces through _putchar(c, ...), whatever the message started out
            as -- so hooking it prints the kernel's own log, fully formatted,
@@ -161,61 +152,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
            goes on to msgbuf and cnputc; we only watch. */
         if (kmsgs && cpu.pc == KERN_PUTCHAR)
             kmsg_putchar((int)(RD(2) & 0xff), RD(3));
-        if (log_msgs) {
-            if (cpu.pc == LOG_ROUTINE) {
-                char fmt[200];
-                mem_cstr(RD(3), fmt, sizeof fmt);
-                if (RD(3) != last_fmt) {
-                    /* format with the varargs the caller passed in r4.. */
-                    int argi = 4;
-                    printf("[kern] ");
-                    for (char *p = fmt; *p; p++) {
-                        if (*p != '%') { putchar(*p); continue; }
-                        p++;
-                        while (*p && strchr("-0123456789.l", *p)) p++;
-                        u32 v = (argi <= 9) ? RD(argi++) : 0;
-                        switch (*p) {
-                        case 'd': printf("%d", (int)v); break;
-                        case 'u': printf("%u", v); break;
-                        case 'x': printf("%x", v); break;
-                        case 'c': putchar((int)v); break;
-                        case 's': { char b[160]; mem_cstr(v, b, sizeof b);
-                                    fputs(b, stdout); } break;
-                        case '%': putchar('%'); argi--; break;
-                        default: putchar('%'); if (*p) putchar(*p); argi--;
-                        }
-                    }
-                    if (!strchr(fmt, '\n')) putchar('\n');
-                    last_fmt = RD(3);
-                }
-            } else if (cpu.pc == PRINTF_THROTTLE) {
-                char fmt[160];
-                mem_cstr(RD(2), fmt, sizeof fmt);
-                if (RD(2) != last_fmt && fmt[0]) {
-                    printf("[kern] %s", fmt);
-                    if (!strchr(fmt, '\n')) putchar('\n');
-                    /* resolve a %s argument: the caller hands over a small
-                       descriptor, so scan it for a pointer into kernel data
-                       that resolves to printable text */
-                    if (strstr(fmt, "%s")) {
-                        for (int k = 0; k < 6; k++) {
-                            u32 p = mem_r32(RD(3) + 4 * k);
-                            if (p < 0xC1000000u || p > 0xC1030000u) continue;
-                            char s[120];
-                            if (mem_cstr(p, s, sizeof s) < 3) continue;
-                            int ok = 1;
-                            for (char *q = s; *q; q++)
-                                if (*q < 32 || *q > 126) { ok = 0; break; }
-                            if (ok && strcmp(s, fmt)) {
-                                printf("[kern]   -> \"%s\"\n", s);
-                                break;
-                            }
-                        }
-                    }
-                    last_fmt = RD(2);
-                }
-            }
-        }
         if (brk_watch_pc && !(cpu.cr[1] & 0x80000000u)
             && (cpu.pc == brk_watch_pc + 4u || cpu.pc == brk_watch_pc + 8u)) {
             if (!quiet_uproc)
@@ -347,46 +283,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
             for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
             putchar('\n');
         }
-    /*
-     * Locate the kernel's real page tables.  It built them while translation
-     * was effectively identity, so they are physically wherever it wrote
-     * them -- not at the address its APR now advertises.  Scan every
-     * allocated page as a candidate segment table: does its entry for
-     * findpt_va point at a page table whose entry for findpt_va is valid?
-     */
-    if (findpt_va) {
-        u32 sidx = (findpt_va >> 22) & 0x3FF, pidx = (findpt_va >> 12) & 0x3FF;
-        unsigned live = 0, hits = 0;
-        printf("searching for a segment table mapping %08x "
-               "(seg %u, page %u)\n", findpt_va, sidx, pidx);
-        for (u32 i = 0; i < NPAGES; i++) {
-            if (!pages[i]) continue;
-            live++;
-            u32 cand = i << 12;
-            u32 sdesc = mem_r32(cand + sidx * 4);
-            if (!(sdesc & 1)) continue;
-            u32 pgtab = sdesc & 0xFFFFF000u;
-            if (!pages[pgtab >> 12]) continue;
-            u32 pdesc = mem_r32(pgtab + pidx * 4);
-            if (!(pdesc & 1)) continue;
-            if (hits++ < 8)
-                printf("  segtab %08x -> pgtab %08x -> pte %08x (pa %08x)\n",
-                       cand, pgtab, pdesc,
-                       (pdesc & 0xFFFFF000u) | (findpt_va & 0xFFF));
-        }
-        printf("  %u candidate segment tables among %u live pages\n",
-               hits, live);
-    }
-
-    if (dump_addr) {
-        printf("memory at %08x:\n", dump_addr);
-        for (int k = 0; k < 4; k++) {
-            printf("  %08x ", dump_addr + k * 16);
-            for (int j = 0; j < 16; j += 4)
-                printf(" %08x", mem_r32(dump_addr + k * 16 + j));
-            putchar('\n');
-        }
-    }
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     if (!quiet_uproc) {
         printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);

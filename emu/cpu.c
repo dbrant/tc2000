@@ -370,36 +370,6 @@ int step(void)
     }
 
 
-    /* one-shot: dump the run queue + curproc context at the swapper sleep */
-    if (uland_probe && sysmode && pc == 0xC0054720u && RD(1) == 0xC004859Cu) {
-        static int once = 0;
-        if (!once) { once = 1;
-            u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
-            u32 ctx = mem_r32(translate(cp + 0xc8, 0));
-            printf("[uland] curproc=%08x link+4=%08x state+40=%08x ctx+c8=%08x\n",
-                   cp, mem_r32(translate(cp+0x04,0)), mem_r32(translate(cp+0x40,0)), ctx);
-            if (ctx >= 0xC0000000u)
-                printf("        ctx: pc+80=%08x sp+7c=%08x pgdir+a0=%08x\n",
-                       mem_r32(translate(ctx+0x80,0)), mem_r32(translate(ctx+0x7c,0)),
-                       mem_r32(translate(ctx+0xa0,0)));
-            /* dump the run-queue head region (c0014498) and follow the chain */
-            printf("        runq head c0014498: ");
-            for (int i=0;i<8;i++) printf("%08x ", mem_r32(translate(0xC0014498u+i*4,0)));
-            printf("\n");
-            u32 link = mem_r32(translate(0xC0014498u, 0));   /* first entry */
-            for (int n=0; n<12 && link>=0xC0000000u && link!=0xC0014498u; n++) {
-                printf("        rq[%d] proc=%08x  fwd+0=%08x  ctx+c8=%08x pc=%08x\n",
-                       n, link, mem_r32(translate(link+0,0)),
-                       mem_r32(translate(link+0xc8,0)),
-                       mem_r32(translate(link+0xc8,0))>=0xC0000000u
-                         ? mem_r32(translate(mem_r32(translate(link+0xc8,0))+0x80,0)) : 0);
-                u32 nx = mem_r32(translate(link+0, 0));
-                if (nx==link) break;
-                link = nx;
-            }
-        }
-    }
-
     /* debug: pipeline state at load_context's rte -- only for switches that
        land in USER mode (EPSR bit31 clear); the 64 boot switches are all
        supervisor and would just be noise. */
@@ -446,26 +416,6 @@ int step(void)
                mem_r32(translate(0xC1015A48u, 0)),
                mem_r32(translate(0xC009EB40u, 0)),
                RD(9), (unsigned long long)cpu.count);
-    }
-
-    if (pc == 0xc0017498u) lctx_switch(RD(2));
-
-    if (lct_trace && pc == 0xc0071db8u) {   /* vfs_mountroot's jsr to fs mountroot */
-        printf("[mount] jsr arg=%08x curproc=%08x cur_u98=%08x r31=%08x @%llu\n",
-               RD(2), mem_r32(translate(0xFBFFE0F0u, 0)), cur_u98, RD(31),
-               (unsigned long long)cpu.count);
-    }
-    if (lct_trace && pc == 0xc004e954u) {   /* __gh_mvb: r1=procdup() return */
-        printf("[fork] procdup ret r2=%08x cur_u98=%08x -> %s @%llu\n",
-               RD(2), cur_u98, RD(2) ? "CHILD-path" : "parent-path",
-               (unsigned long long)cpu.count);
-    }
-    if (lct_trace && pc == 0xc0055cc0u) {   /* _swtch_pri entry */
-        u32 wq_lo = mem_r32(translate(0xC00145B0u, 0));
-        u32 wq_hi = mem_r32(translate(0xC00145B4u, 0));
-        printf("[swtch] pri=%08x caller=%08x curproc=%08x whichqs=%08x:%08x @%llu\n",
-               RD(2), RD(1), mem_r32(translate(0xFBFFE0F0u, 0)), wq_hi, wq_lo,
-               (unsigned long long)cpu.count);
     }
 
     if (watch_pc && pc == watch_pc) {
@@ -631,14 +581,6 @@ int step(void)
         }
     } else {
         goto badinsn;
-    }
-
-    if (realmm && dbg_trans && pc >= 0xC0000000u) {
-        u32 npc = (cpu.has_pending) ? cpu.pending
-                : taken ? (delayed ? next_pc : branch) : next_pc;
-        if (npc < 0xC0000000u && npc >= 0x8000u && npc < 0xE0000000u)
-            printf("[VA->phys] %08x (%s) -> %08x\n", pc,
-                   taken ? "branch" : "fall", npc);
     }
 
     /* --- sequencing: delay slots are explicit --- */

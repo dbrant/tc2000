@@ -15,14 +15,9 @@ u8 **pages;
  * walk reads when the APR points at interleaved 0x80110000.
  */
 int realmm;
-int dbg_trans;
-u64 pcsample;
 int scsi_trace, scsi_trace_n;  /* --scsitrace: log VME controller I/O */
 u32 irq_source;
 u16 sha_status;
-u32 wmem_addr;                 /* --wmem=ADDR: trace writes to a word */
-u32 wval;                      /* --wval=V: trace writes whose value&~0xfff==V */
-u32 wmem_lo, wmem_hi;          /* --wrange=LO:HI: trace writes in range */
 u64 dbg_count;                 /* current instruction count */
 u32 dbg_pc;                    /* fwd: current pc, for trace prints */
 CPU cpu;
@@ -51,7 +46,6 @@ const u8 memop_scale[16] = {
    TIMER_ADDR are forward-declared above so memop can see them) */
 u32  force_sig_pc;      /* pc at which to force the TCS EEPROM sig */
 u32  force_sig_val;
-int  log_msgs;
 /*
  * Which CMMUs this node actually has.  Advertising one at every slot is wrong:
  * the boot path cross-checks the second code MMU against a per-node config
@@ -75,33 +69,22 @@ int n_cmmu = 2;
 u32 cmram_sel;
 u64 cmram_reads, cmram_writes;
 u8 **cmram_pages;                  /* dedicated CMRAM backing store */
-int  mmu_trace;
-int  lct_trace;
-int  realu;                         /* virtualize per-process u-area at load_context */
-int  batc_trace;
-u32  dump_addr;
-u32  findpt_va;
 u32  watch_pc;
 int  dump_pchist;
-int  dump_uarea;
 int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 int  interactive;      /* --shell: hand the terminal to /bin/sh */
 int  kmsgs;            /* --kmsg: echo the kernel's console output */
-int  brk_passthru;     /* --brk-passthru: let obreak reach the kernel */
 u32  brk_watch_pc, brk_watch_arg;
 u32  last_sleep_chan, last_sleep_from;
 u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
 u32  cfg_nodes;                /* if >0, seed node-presence for N nodes */
-int  uland_probe;              /* dump run queue at the swapper sleep */
 int  deliver_traps;            /* deliver user traps to kernel handlers */
 int  trace_traps;              /* log each delivered trap */
 u64  trace_pc_until;           /* print PCs until this instruction count */
-u32  utrap_vec = 128;        /* --utest syscall trap vector */
 const char *uprog_path;      /* --uprog=PATH: real binary for proc1 */
 u64  probe_hits, probe_misses;
 int synth_boot = 1;
 u32 ptpool_next = PTPOOL;
-u32 seed_mapper;
 /*
  * Stride defaults to 8KB (page-granular, no 32-bit overflow across 96 slots).
  * The mapper geometry isn't fully pinned, but the value is not yet exercised:
@@ -112,7 +95,6 @@ u32 seed_mapper;
 u32 fl_stride = 0x2000;
 u32 tcs_mbox_pa = TCS_MBOX;
 u64 tcs_commands;
-int tcs_trace;
 /*
  * Interleaver stub.
  *
@@ -144,7 +126,6 @@ u64 ileave_redirects;
 int translate_on;
 u64 xlat_faults;
 u32 last_fault_va, last_fault_pc;
-u32 xva;   /* --xva: log translations of this VA */
 int clock_irq;
 u64 clock_period = 100000, next_clock;
 /* Pragmatic SCSI path.  The SHA driver rings the controller doorbell and then
