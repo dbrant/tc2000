@@ -165,6 +165,8 @@ int utest;
 u32 usegtab_cur;
 unsigned udemand_count;
 int  console_io = 1;                 /* --no-console disables      */
+int  console_port;                   /* --console-port=N: serve the interactive
+                                        console on a loopback TCP socket (0=stdio) */
 u8   fd_kernel[64];                  /* fd allocated by the kernel */
 u8   fd_console[64] = { 1, 1, 1 };   /* which fds still reach the host */
 u32  fd_watch_pc;                    /* trap pc of an fd-returning syscall */

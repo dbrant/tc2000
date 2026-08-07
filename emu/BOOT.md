@@ -103,6 +103,29 @@ kernel's own code — so only what shipped on the installer is there (`wc` and
 `who`, for instance, are not). It is read-only in effect: writes go into the
 buffer cache and no further, because no disk is modelled yet.
 
+### A detachable console — `--console-port`
+
+By default the shell shares the emulator's stdin/stdout with the kernel log.
+`--console-port=N` splits them: the kernel boot log keeps flowing to stdout, and
+the interactive session is served on a loopback TCP socket at `127.0.0.1:N` for a
+VT100/telnet client to attach to.
+
+```sh
+./nx88.exe sys <path-to>/tapeimage/vmunix --shell --console-port=2323 --kmsg
+# ...boot log on stdout... then in another window:
+telnet 127.0.0.1 2323        # or: nc 127.0.0.1 2323, or PuTTY (Raw/Telnet)
+```
+
+The emulator boots (log to stdout), then blocks at the shell banner until a
+client connects. The socket is a serial-console stand-in and does the terminal
+cooking the host tty used to do for us: LF→CRLF on output, CR/CRLF/CR-NUL→LF on
+input, server-side echo with backspace line-editing (a whole cooked line is
+buffered and drained across the many one-byte reads `/bin/sh` issues), and `^D`
+as end-of-file. A little telnet IAC negotiation (`WILL ECHO`, `WILL/DO SGA`)
+puts a real telnet client into character mode; raw-TCP clients ignore it and
+behave the same. Closing the client sends EOF, so the shell exits and the
+emulator with it.
+
 A clean default run ends with:
 
 ```

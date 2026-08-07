@@ -590,8 +590,8 @@ void launch_utest(void)
     cpu.pc = uva;
     cpu.cr[1] = 0u;                                 /* user mode, interrupts on */
     if (interactive)
-        printf("\n=== nX on the TC2000 -- /bin/sh from the 1989 install tape ===\n"
-               "The root filesystem is the tape's own UFS.  ^D or `exit' quits.\n\n");
+        con_write_str("\n=== nX on the TC2000 -- /bin/sh from the 1989 install tape ===\n"
+                      "The root filesystem is the tape's own UFS.  ^D or `exit' quits.\n\n");
     if (!quiet_uproc) printf("[utest] user @VA %08x segtab=%08x kstack(cr17)=%08x; dropping to "
            "user mode\n", uva, segtab, cpu.cr[17]);
 }

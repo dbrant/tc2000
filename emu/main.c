@@ -48,6 +48,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);
         else if (!strcmp(argv[i], "--no-console")) console_io = 0;
+        else if (!strncmp(argv[i], "--console-port=", 15)) console_port = (int)strtoul(argv[i]+15, 0, 0);
         else if (!strcmp(argv[i], "-v"))           verbose_sys = 1;
         /* --- mode + non-option words --- */
         else if (!strcmp(argv[i], "sys"))  mode_sys = 1;
@@ -61,9 +62,12 @@ int main(int argc, char **argv)
                 "       nx88 sys  <vmunix> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
                 "                          [--nodes=N] [--identity]\n"
                 "                          [--tape=PATH] [--disk=PATH]\n"
+                "                          [--console-port=N]\n"
                 "  --tape=PATH  root filesystem image (the tape's UFS; default:\n"
                 "               <vmunix-dir>.img, e.g. .../tapeimage.img)\n"
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
+                "  --console-port=N  serve the interactive console on 127.0.0.1:N\n"
+                "               (VT100/telnet); the kernel log stays on stdout\n"
                 "  sys mode defaults to the real-memory model with EEPROM signature\n"
                 "  'A'; pass --identity for the superseded identity path.\n");
         return 2;
@@ -125,6 +129,9 @@ int main(int argc, char **argv)
             printf("disk image: %s (open, rw)\n", disk_img_path);
             sd_ensure_label();
         }
+        /* If asked, route the interactive console to a TCP socket instead of
+           stdin/stdout so a VT100/telnet client can attach to the session. */
+        console_listen(console_port);
     }
     if (mode_sys) return run_sys(path, limit, sig);
 
