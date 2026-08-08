@@ -132,6 +132,35 @@ A clean default run ends with:
 [boot-complete] kernel reached the swapper sched() idle loop @55243479 -- main() done, root mounted.
 ```
 
+### Populating and running from the SCSI disk
+
+Once `newfs` + `mount` gave a real FFS on `disk.img`, three pieces let the guest
+fill it and run programs out of it:
+
+- **`--hostfile=PATH`** exposes a host file to the guest at the synthetic path
+  `/hosttar`, read-only, serviced straight from the host (parallel to the raw
+  `sd0` path).  So the guest can `mount /dev/sd0b /mnt; cd /mnt; tar xpf /hosttar`
+  to unpack an archive that lives on no guest filesystem.  The view is zero-padded
+  past EOF to a full tar record, because archives in hand may be truncated (no
+  terminator) and the 1989 BSD `tar` is stricter than GNU tar.
+- **`ffs.c`** is a read-only 4.3BSD FFS reader over `disk.img` (superblock → name
+  lookup → inode → direct/indirect blocks; big-endian, offsets pinned against a
+  guest-populated image).
+- **`--diskmount=DIR`** tells the emulator where `disk.img` is mounted, so the
+  `execve` shortcut, when a binary isn't on the host tape mirror, resolves the
+  path within `disk.img`'s FFS and loads the a.out from there.
+
+The a.out loader handles **two layouts**: nX/m88k (`mid` 0 — 8192-byte header
+page, text at file offset 8192, load VA 0) and standard ZMAGIC (`mid` != 0 —
+text at file offset 0, load VA 0x2000).  Verified end to end: an m88k binary
+copied onto `disk.img` (`cp /bin/cat /mnt/catm88`) loads through the FFS reader
+and runs (`echo hi | /mnt/catm88`).
+
+Note on the `usr.tar` in this collection: it is a **Sun-3 (MC68020, a.out
+`mid` 2)** `/usr` — `mnt/bin/sun3cvt`, a whole `mnt/include/sun3/` tree, m68k
+code (`4eb9` JSR abs-long).  Its files copy onto `disk.img` and are readable,
+but they are the wrong architecture to execute on the m88k TC2000 emulator.
+
 ## The boot arc, in order
 
 Each of these was a distinct blocker that had to be understood and cleared.

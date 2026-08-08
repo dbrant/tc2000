@@ -41,22 +41,35 @@ void uwrite32(u32 segtab, u32 va, u32 v)
     uwrite8(segtab, va + 2, (u8)(v >> 8));  uwrite8(segtab, va + 3, (u8)v);
 }
 
-int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_out,
-                             const char **av, unsigned nav,
-                             const char **ev, unsigned nev)
+/* Map an already-parsed a.out into a fresh address space and build its BSD
+   startup stack.  Shared by the host-file and FFS loaders below. */
+static int load_from_aout(AOut *pa, const char *name, u32 segtab, u32 *entry,
+                          u32 *sp_out, const char **av, unsigned nav,
+                          const char **ev, unsigned nev)
 {
-    AOut a;
-    if (aout_load(path, &a)) return -1;
-    u32 dv = (a.text + 4095) & ~4095u;
-    u32 total = dv + a.data + a.bss;
+    AOut a = *pa;
+    /* Two a.out layouts coexist.  nX tape binaries (mid 0) put a full 8192-byte
+       header page first, so text is at file offset 8192 and loads at VA 0.  The
+       /usr tools (mid 2) are standard ZMAGIC: text at file offset 0, loaded at
+       VA 0x2000 with the 32-byte header in its first page (entry 0x2020), and
+       data immediately after text in the file. */
+    int std = ((a.magic >> 16) & 0xffu) != 0;
+    u32 txtoff  = std ? 0        : HDR_PAGE;
+    u32 txtaddr = std ? HDR_PAGE : 0;
+    u32 dataddr = txtaddr + ((a.text + 4095) & ~4095u);
+    u32 datoff  = txtoff + a.text;                 /* data follows text in file */
+    u32 dv = dataddr;                              /* reported below            */
+    u32 va_hi = dataddr + a.data + a.bss;
 
-    for (u32 va = 0; va < total; va += PAGE_SIZE) {
+    for (u32 va = txtaddr; va < va_hi; va += PAGE_SIZE) {
         u32 pg = upool_alloc();                       /* zeroed */
         umap(segtab, va, pg);
         for (u32 i = 0; i < PAGE_SIZE; i++) {
             u32 o = va + i; u8 b = 0;
-            if (o < a.text)                       b = a.img[HDR_PAGE + o];
-            else if (o >= dv && o < dv + a.data)  b = a.img[HDR_PAGE + a.text + (o - dv)];
+            if (o >= txtaddr && o < txtaddr + a.text)
+                b = a.img[txtoff + (o - txtaddr)];
+            else if (o >= dataddr && o < dataddr + a.data)
+                b = a.img[datoff + (o - dataddr)];
             mem_w8(pg + i, b);                        /* bss stays zero */
         }
     }
@@ -92,8 +105,31 @@ int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_out,
 
     *entry = a.entry; *sp_out = sp;
     if (!quiet_uproc) printf("[uproc] loaded %s: text=%u data=%u@%08x bss=%u entry=%08x sp=%08x argc=%u\n",
-           path, a.text, a.data, dv, a.bss, a.entry, sp, nav);
+           name, a.text, a.data, dv, a.bss, a.entry, sp, nav);
     return 0;
+}
+
+/* Load a program image from a host file (the tape mirror). */
+int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_out,
+                             const char **av, unsigned nav,
+                             const char **ev, unsigned nev)
+{
+    AOut a;
+    if (aout_load(path, &a)) return -1;
+    return load_from_aout(&a, path, segtab, entry, sp_out, av, nav, ev, nev);
+}
+
+/* Load a program image straight out of disk.img's FFS (the mounted SCSI disk).
+   `fspath` is the path within that filesystem (guest path minus --diskmount). */
+static int load_user_prog_ffs(const char *fspath, u32 segtab, u32 *entry,
+                              u32 *sp_out, const char **av, unsigned nav,
+                              const char **ev, unsigned nev)
+{
+    u8 *img; u32 len;
+    if (ffs_read_file(fspath, &img, &len)) return -1;
+    AOut a;
+    if (aout_load_mem(img, len, &a)) { free(img); return -1; }
+    return load_from_aout(&a, fspath, segtab, entry, sp_out, av, nav, ev, nev);
 }
 
 /* Map a guest path onto the extracted tape directory that mirrors the root
@@ -342,6 +378,14 @@ int uproc_syscall(u32 sysno, u32 tpc)
         usegtab_cur = 0;              /* no demand paging while we build it */
         int rc = load_user_prog_av(guest_path(path), fresh, &entry, &sp,
                                    av, nav, ev, nev);
+        /* Not on the host tape mirror?  If the path is under the mounted SCSI
+           disk, load the binary from disk.img's own FFS instead. */
+        if (rc && disk_mount) {
+            size_t ml = strlen(disk_mount);
+            if (!strncmp(path, disk_mount, ml) && (path[ml] == '/' || path[ml] == 0))
+                rc = load_user_prog_ffs(path + ml, fresh, &entry, &sp,
+                                        av, nav, ev, nev);
+        }
         usegtab_cur = save;
         if (rc) {
             if (!quiet_uproc) printf("[uproc] pid %d execve(\"%s\") -> ENOENT\n", me->pid, path);

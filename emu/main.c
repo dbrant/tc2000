@@ -25,6 +25,8 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--nodes=", 8)) cfg_nodes = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--tape=", 7))  root_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--disk=", 7))  disk_img_path = argv[i]+7;
+        else if (!strncmp(argv[i], "--hostfile=", 11)) hostfile_path = argv[i]+11;
+        else if (!strncmp(argv[i], "--diskmount=", 12)) disk_mount = argv[i]+12;
         else if (!strcmp(argv[i], "--scsi"))       sha_desc_clear = 0x14;
         else if (!strcmp(argv[i], "--identity"))   identity_mode = 1;
         else if (!strcmp(argv[i], "--clock"))      clock_irq = 1;
@@ -66,6 +68,10 @@ int main(int argc, char **argv)
                 "  --tape=PATH  root filesystem image (the tape's UFS; default:\n"
                 "               <vmunix-dir>.img, e.g. .../tapeimage.img)\n"
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
+                "  --hostfile=PATH  expose a host file to the guest at /hosttar\n"
+                "               read-only (e.g. `tar xpf /hosttar` in the guest)\n"
+                "  --diskmount=DIR  guest mount point of disk.img, so execve can\n"
+                "               load binaries from the SCSI disk's own FFS\n"
                 "  --console-port=N  serve the interactive console on 127.0.0.1:N\n"
                 "               (VT100/telnet); the kernel log stays on stdout\n"
                 "  sys mode defaults to the real-memory model with EEPROM signature\n"
@@ -128,6 +134,28 @@ int main(int argc, char **argv)
         if (disk_img) {
             printf("disk image: %s (open, rw)\n", disk_img_path);
             sd_ensure_label();
+        }
+        /* Host archive exposed to the guest at /hosttar (read-only). */
+        if (hostfile_path) {
+            hostfile_img = fopen(hostfile_path, "rb");
+            if (hostfile_img) {
+                fseek(hostfile_img, 0, SEEK_END);
+                hostfile_size = (u32)ftell(hostfile_img);
+                rewind(hostfile_img);
+                /* Present a zero-padded EOF.  This /usr archive is truncated --
+                   its final member (tftpd) is cut off mid-data with no tar
+                   terminator -- so pad generously past real EOF: enough to let a
+                   strict reader finish the truncated last member (as zeros) and
+                   then see tar's two-zero-block end marker, ending at rc 0
+                   instead of a checksum error.  tar stops at the terminator, so
+                   the extra headroom is never actually read. */
+                hostfile_vsize = ((hostfile_size + 10239u) / 10240u) * 10240u
+                                 + (4u << 20);         /* + 4 MiB of zeros */
+                printf("host file: %s (open, ro, %u bytes) -> guest /hosttar\n",
+                       hostfile_path, hostfile_size);
+            } else {
+                fprintf(stderr, "host file: %s could not be opened\n", hostfile_path);
+            }
         }
         /* If asked, route the interactive console to a TCP socket instead of
            stdin/stdout so a VT100/telnet client can attach to the session. */

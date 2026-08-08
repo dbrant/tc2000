@@ -338,6 +338,69 @@ int disk_syscall(u32 sysno, u32 tpc)
     return 1;
 }
 
+/* Host-file passthrough.  The guest opens the synthetic path /hosttar and the
+   emulator services open/read/lseek/close straight from the host file named by
+   --hostfile (read-only), so a guest tool such as `tar xpf /hosttar` can consume
+   an archive that exists on no guest filesystem.  The synthesized descriptor is
+   allocated high (>=40) so it never collides with the low fds the kernel hands
+   out for tar's output files.  Returns 1 if handled. */
+#define HOSTFILE_GUESTPATH "/hosttar"
+int hostfile_syscall(u32 sysno, u32 tpc)
+{
+    if (!hostfile_img) return 0;
+    u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
+    long ret;
+    switch (sysno) {
+    case 5: {                                          /* open(path, flags, mode) */
+        char p[128];
+        uread_str(a0, p, sizeof p);
+        if (strcmp(p, HOSTFILE_GUESTPATH) != 0) return 0;   /* not our path */
+        int fd = -1;
+        for (int i = 40; i < 64; i++) if (!fd_host[i]) { fd = i; break; }
+        if (fd < 0) return 0;
+        fd_host[fd] = 1; host_off[fd] = 0;
+        ret = fd;
+        break;
+    }
+    case 3: {                                          /* read(fd, buf, n) */
+        if (a0 >= 64 || !fd_host[a0]) return 0;
+        u32 off = host_off[a0];
+        if (off >= hostfile_vsize) { ret = 0; break; } /* true EOF (past padding) */
+        u32 want = a2;
+        if (off + want > hostfile_vsize) want = hostfile_vsize - off;
+        u8 *tmp = calloc(want ? want : 1, 1);          /* zero-filled */
+        if (off < hostfile_size) {                     /* real bytes, then zeros */
+            u32 rn = (off + want <= hostfile_size) ? want : (hostfile_size - off);
+            if (fseek(hostfile_img, (long)off, SEEK_SET) == 0)
+                if (fread(tmp, 1, rn, hostfile_img) == 0) { /* short: leave zeros */ }
+        }
+        for (u32 i = 0; i < want; i++) mem_w8(translate(a1 + i, 0), tmp[i]);
+        free(tmp);
+        host_off[a0] += want;
+        ret = (long)want;
+        break;
+    }
+    case 19: {                                         /* lseek(fd, off, whence) */
+        if (a0 >= 64 || !fd_host[a0]) return 0;
+        if (a2 == 0)      host_off[a0] = a1;               /* SEEK_SET */
+        else if (a2 == 1) host_off[a0] += a1;              /* SEEK_CUR */
+        else if (a2 == 2) host_off[a0] = hostfile_vsize + a1;/* SEEK_END */
+        ret = (long)host_off[a0];
+        break;
+    }
+    case 6:                                            /* close(fd) */
+        if (a0 >= 64 || !fd_host[a0]) return 0;
+        fd_host[a0] = 0; host_off[a0] = 0;
+        ret = 0;
+        break;
+    default:
+        return 0;
+    }
+    WR(2, (u32)ret);
+    cpu.pc = tpc + 8;
+    return 1;
+}
+
 /* Service a syscall entirely in the emulator.  Returns 1 if handled, and
    leaves the result in r2 with the pc advanced past the error branch. */
 int console_syscall(u32 sysno, u32 tpc)

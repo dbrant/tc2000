@@ -179,6 +179,21 @@ u8   fd_pipe[64];                    /* fd -> pipe index + 1 */
 u8   fd_disk[64];                    /* fd -> the raw sd0 device (routed to disk.img) */
 u32  disk_off[64];                   /* per-fd byte offset into disk.img (lseek) */
 int  fd_watch_disk;                  /* the fd-returning open was for the raw disk */
+/* Host-file passthrough (--hostfile=PATH): the guest opens the synthetic path
+   /hosttar and the emulator serves reads straight from this host file, so guest
+   tools (tar) can consume an archive that lives on no filesystem.  Read-only. */
+const char *hostfile_path;
+const char *disk_mount;              /* --diskmount=/usr: where the guest mounts
+                                        disk.img, so execve can map a guest path
+                                        onto disk.img's FFS and load from there */
+FILE *hostfile_img;
+u32  hostfile_size;                  /* real byte length of the host file */
+u32  hostfile_vsize;                 /* length presented to the guest: real size
+                                        padded with zero blocks to a full tar
+                                        record, so a terminator-less archive still
+                                        ends in the two zero blocks tar expects */
+u8   fd_host[64];                    /* fd -> the /hosttar passthrough */
+u32  host_off[64];                   /* per-fd byte offset into hostfile_img */
 const char *uargv[MAX_UARGV];
 const char *uenvp[MAX_UENVP];
 unsigned nuargv, nuenvp;

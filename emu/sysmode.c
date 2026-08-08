@@ -205,6 +205,13 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     trap_taken = 0;
                     continue;
                 }
+                /* Host-file passthrough (/hosttar, --hostfile): open/read/lseek/
+                   close served from the host archive so guest tar can read it. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && hostfile_syscall(RD(9), trap_pc)) {
+                    trap_taken = 0;
+                    continue;
+                }
                 /* fork/execve/wait/exit are serviced here too; see the
                    process-management notes above. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)

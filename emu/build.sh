@@ -5,7 +5,7 @@
 set -e
 taskkill //F //IM nx88.exe >/dev/null 2>&1 || true
 gcc -O2 -Wall -o nx88.exe \
-    globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c \
+    globals.c memory.c devices.c mmu.c cpu.c aout.c ffs.c kmsg.c \
     usermode.c console.c proc.c sysmode.c main.c \
     -lws2_32
 echo "built nx88.exe"
