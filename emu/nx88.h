@@ -70,6 +70,11 @@ typedef uint64_t u64;
 #define KOFF 0xC0000000u                 /* kernel VA -> PA offset */
 #define TCS_MBOX 0xFE001800u
 #define PMAP_MAP_FN 0xC00A6B44u
+/* --procexp scratch: a free kernel VA between the end of text (0xC00D2000) and
+   the data segment (0xC1000000).  +0x00 the enter-user trampoline, +0x20 the
+   `br .` proc0 resumes at once the process has exited. */
+#define PROCEXP_TRAMP 0xC0F00000u
+#define PROCEXP_IDLE  (PROCEXP_TRAMP + 0x20u)
 #define TLB_BITS 12
 #define TLB_SIZE (1u << TLB_BITS)
 #define SHA_O_LO 0xC00BC000u
@@ -181,6 +186,7 @@ u32  kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6);
 void vm_experiment(void);
 int  proc_experiment(void);
 extern int procexp;
+extern int procexec;
 extern int quiet_uproc;
 extern int interactive;
 extern int kmsgs;

@@ -73,6 +73,7 @@ u32  watch_pc;
 int  dump_pchist;
 int  vmprobe;          /* --vmprobe: count kernel VM/fault entries (step-1 probe) */
 int  vmexp;            /* --vmexp: at boot-complete, drive kernel VM funcs via RPC */
+int  procexec;        /* --procexec: let the kernel's own execve load the binary */
 int  procexp;         /* --procexp: create a real proc with the kernel's newproc */
 int  ctxtrace;         /* --ctxtrace: log every distinct load_context() context */
 u32  wmem_lo, wmem_hi; /* --wmem=A[:L]: log stores into this virtual range */

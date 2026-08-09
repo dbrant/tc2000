@@ -91,6 +91,13 @@ int run_sys(const char *path, u64 limit, u32 sig)
             if (utest) { launch_utest(); continue; }   /* drop to user mode */
             break;
         }
+        /* --procexp: the process has exited and the kernel switched back to
+           proc0, which we parked on a br-to-self.  Report and stop. */
+        if (procexp && cpu.pc == PROCEXP_IDLE) {
+            printf("[procexp] process exited; kernel switched back to proc0 "
+                   "@%llu\n", (unsigned long long)cpu.count);
+            break;
+        }
         /* halt catcher: _tcs_shutdown+0x38 and _doadump+0x20 are br-to-self
            spins reached only after a panic/reboot has run its course */
         if (cpu.pc == 0xC00A24F4u || cpu.pc == 0xC00A24B8u) {

@@ -340,27 +340,47 @@ int proc_experiment(void)
     printf("  kernel table bias = %08x (table VA %08x, kernel PA %08x)\n",
            ktab_bias, kr32(pmap), kr32(pmap + 4));
 
-    /* --- load a real nX binary into the proc's address space --- */
-    AOut a;
-    static char defprog[1024];
-    const char *path = uprog_path;
-    if (!path) {
-        snprintf(defprog, sizeof defprog, "%s/bin/echo", guest_root);
-        path = defprog;
+    /* --- fill the address space ---
+       Default: load the a.out image directly.  That works (echo/date/pwd run and
+       exit cleanly) but leaves the kernel's OWN bookkeeping -- text/data/stack
+       sizes and the break -- unset, so the first sbrk fails and `ls` dies with
+       "out of memory" in obreak.
+       --procexec instead maps a nine-instruction stub that calls execve() and
+       lets the kernel load the binary itself.  That is the real destination, but
+       it is BLOCKED: the kernel's own software translation of a user address
+       (user_vtop, c00ab278) reads the page tables at the physical addresses it
+       believes in, which this emulator does not honour, so copyin of the exec
+       path fails.  See the kernel-space coherence note below. */
+    static char gpath[1024];
+    const char *path = uprog_path ? uprog_path : "/bin/echo";
+    static char hostpath[1024];
+    {   /* the guest sees the tape directory as /, so strip the host prefix */
+        const char *g = path;
+        size_t gl = guest_root ? strlen(guest_root) : 0;
+        if (gl && !strncmp(g, guest_root, gl)) g += gl;
+        snprintf(gpath, sizeof gpath, "%s", *g == '/' ? g : "/bin/echo");
+        snprintf(hostpath, sizeof hostpath, "%s%s", guest_root ? guest_root : "",
+                 gpath);
+        if (!uprog_path) path = hostpath;
     }
-    if (aout_load(path, &a)) { printf("  !! cannot load %s\n", path); return 0; }
-    /* nX tape a.out: an 8192-byte header page in the file, text loading at VA 0
-       (see load_from_aout in proc.c for the two layouts). */
-    int std      = ((a.magic >> 16) & 0xFFu) != 0;
-    u32 txtoff   = std ? 0 : HDR_PAGE, txtaddr = std ? HDR_PAGE : 0;
-    u32 dataddr  = txtaddr + ((a.text + 4095) & ~4095u);
-    u32 datoff   = txtoff + a.text;
-    u32 img_hi   = (dataddr + a.data + a.bss + 0x1FFFu) & ~0x1FFFu;
-    u32 stk_lo   = STACK_TOP - 0x10000u;
-
+    AOut a;
+    u32 txtaddr = 0, txtoff = 0, dataddr = 0, datoff = 0, img_hi = 0x2000u;
+    if (!procexec) {
+        if (aout_load(path, &a)) { printf("  !! cannot load %s\n", path); return 0; }
+        /* nX tape a.out: an 8192-byte header page in the file, text at VA 0
+           (see load_from_aout in proc.c for the two layouts). */
+        int std  = ((a.magic >> 16) & 0xFFu) != 0;
+        txtoff   = std ? 0 : HDR_PAGE; txtaddr = std ? HDR_PAGE : 0;
+        dataddr  = txtaddr + ((a.text + 4095) & ~4095u);
+        datoff   = txtoff + a.text;
+        img_hi   = (dataddr + a.data + a.bss + 0x1FFFu) & ~0x1FFFu;
+    } else {
+        a.entry = 0;
+    }
+    u32 stk_lo = STACK_TOP - 0x10000u;
     struct { u32 lo, hi; const char *what; } rng[2] = {
-        { txtaddr & ~0x1FFFu, img_hi, "image" },
-        { stk_lo, STACK_TOP,  "stack" },
+        { 0x00000000u, img_hi, procexec ? "stub" : "image" },
+        { stk_lo, STACK_TOP,   "stack" },
     };
     for (unsigned i = 0; i < 2; i++) {
         mem_w32(translate(slot, 0), rng[i].lo);
@@ -371,31 +391,34 @@ int proc_experiment(void)
                rng[i].what, rng[i].lo, rng[i].hi, e, w);
         if (e || w) return 0;
     }
-    /* Copy text/data in through the frames the kernel chose; bss stays zero. */
-    u32 missing = 0;
-    for (u32 va = rng[0].lo; va < rng[0].hi; va += PAGE_SIZE) {
-        u32 pa = 0;
-        if (!kwalk(pmap, va, &pa, 0, 0)) { missing++; continue; }
-        for (u32 i = 0; i < PAGE_SIZE; i++) {
-            u32 o = va + i;
-            u8 b = 0;
-            if (o >= txtaddr && o < txtaddr + a.text)
-                b = a.img[txtoff + (o - txtaddr)];
-            else if (o >= dataddr && o < dataddr + a.data)
-                b = a.img[datoff + (o - dataddr)];
-            mem_w8(pa + i, b);
-        }
-    }
-    printf("  loaded %s: text=%u@%08x data=%u@%08x bss=%u entry=%08x "
-           "(%u pages unmapped)\n", path, a.text, txtaddr, a.data, dataddr,
-           a.bss, a.entry, missing);
-    if (missing) return 0;
 
-    /* Standard BSD startup stack: strings at the top, then
-       { argc, argv[], NULL, envp[], NULL } for crt0 to unpack. */
+    if (!procexec) {   /* copy text/data into the frames the kernel chose */
+        u32 missing = 0;
+        for (u32 va = 0; va < img_hi; va += PAGE_SIZE) {
+            u32 pa = 0;
+            if (!kwalk(pmap, va, &pa, 0, 0)) { missing++; continue; }
+            for (u32 i = 0; i < PAGE_SIZE; i++) {
+                u32 o = va + i;
+                u8 b = 0;
+                if (o >= txtaddr && o < txtaddr + a.text)
+                    b = a.img[txtoff + (o - txtaddr)];
+                else if (o >= dataddr && o < dataddr + a.data)
+                    b = a.img[datoff + (o - dataddr)];
+                mem_w8(pa + i, b);
+            }
+        }
+        printf("  loaded %s: text=%u@%08x data=%u@%08x bss=%u entry=%08x "
+               "(%u pages unmapped)\n", path, a.text, txtaddr, a.data, dataddr,
+               a.bss, a.entry, missing);
+        if (missing) return 0;
+    }
+
+    /* Arguments on the process's own stack: strings, then the argv/envp arrays.
+       Hand-loaded images additionally get argc in front, which is what crt0
+       unpacks; the exec stub passes the arrays to execve instead. */
     u32 sp = STACK_TOP, sptr[MAX_UARGV + MAX_UENVP + 2];
     unsigned ns = 0;
-    const char *dfl_av[1] = { "echo" };
+    const char *dfl_av[1] = { "prog" };
     const char **av = nuargv ? (const char **)uargv : dfl_av;
     unsigned nav = nuargv ? nuargv : 1;
     for (unsigned k = 0; k < nav; k++) {
@@ -410,13 +433,56 @@ int proc_experiment(void)
         for (u32 i = 0; i < l; i++) uput8(pmap, sp + i, (u8)uenvp[k][i]);
         sptr[ns++] = sp;
     }
-    sp = (sp - (1 + nav + 1 + nuenvp + 1) * 4) & ~7u;
+    u32 plen = (u32)strlen(gpath) + 1;
+    sp -= plen;
+    u32 upath = sp;
+    for (u32 i = 0; i < plen; i++) uput8(pmap, sp + i, (u8)gpath[i]);
+
+    sp = (sp - (!procexec + nav + 1 + nuenvp + 1) * 4) & ~7u;
     u32 w = sp;
-    uput32(pmap, w, nav); w += 4;
-    for (unsigned k = 0; k < nav; k++)      { uput32(pmap, w, sptr[k]); w += 4; }
+    if (!procexec) { uput32(pmap, w, nav); w += 4; }   /* argc, for crt0 */
+    u32 uargvp = w;
+    for (unsigned k = 0; k < nav; k++)     { uput32(pmap, w, sptr[k]); w += 4; }
     uput32(pmap, w, 0); w += 4;
-    for (unsigned k = 0; k < nuenvp; k++)   { uput32(pmap, w, sptr[nav + k]); w += 4; }
+    u32 uenvpp = w;
+    for (unsigned k = 0; k < nuenvp; k++)  { uput32(pmap, w, sptr[nav + k]); w += 4; }
     uput32(pmap, w, 0);
+
+    /* execve(path, argv, envp) -- syscall 59, number in r9, args in r2/r3/r4,
+       trap 128; the kernel returns to pc+4 on error and pc+8 on success (which
+       for a successful exec never happens -- it enters the new image instead). */
+    u32 stub[] = {
+        0x5C400000u | (upath  >> 16), 0x58420000u | (upath  & 0xFFFF), /* r2 */
+        0x5C600000u | (uargvp >> 16), 0x58630000u | (uargvp & 0xFFFF), /* r3 */
+        0x5C800000u | (uenvpp >> 16), 0x58840000u | (uenvpp & 0xFFFF), /* r4 */
+        0x5920003Bu,                       /* or  r9, r0, 59  ; execve  */
+        0xF000D080u,                       /* tb0 0, r0, 128            */
+        0xC0000000u,                       /* +0x20 br . -- exec failed */
+        0xC0000000u,                       /* +0x24 br . -- "succeeded" without
+                                              replacing the image, which means
+                                              the walker lost the new address
+                                              space */
+    };
+    if (procexec) {
+        for (unsigned i = 0; i < sizeof stub / 4; i++) uput32(pmap, i * 4, stub[i]);
+        printf("  exec stub at VA 0: execve(\"%s\", argv@%08x, envp@%08x), sp=%08x\n",
+               gpath, uargvp, uenvpp, sp);
+        /* The kernel translates user addresses in software (user_vtop, c00ab278)
+           by reading the page tables at the physical addresses IT believes in --
+           which this emulator does not honour, so copyin of the exec path fails
+           and execve never even runs.  Report it rather than hide it. */
+        u32 pa = 0; kwalk(pmap, upath, &pa, 0, 0);
+        u32 kv = kcall(0xC00AB278u, upath, 0, 0, 0, 0);
+        printf("  user_vtop(%08x) = %08x   (our walker: pa=%08x)\n", upath, kv, pa);
+        if (!(kv & ~0xFFFu)) {
+            printf("  !! the kernel cannot translate user memory, so execve's "
+                   "copyin fails and it never runs.\n"
+                   "     (Without this check the process just re-execs forever.)"
+                   "  Kernel-space page-table\n     coherence is the blocker -- "
+                   "run without --procexec to hand-load the image instead.\n");
+            return 0;
+        }
+    }
 
     /* --- make it the running process, the kernel's own way ---
        load_context(ctx) restores only r15..r31 and rte's to ctx+0x80, so the
@@ -424,7 +490,7 @@ int proc_experiment(void)
        ARE restored) and resume at a three-instruction trampoline that moves them
        into place and branches to _icode(entry, sp, 0) -- the kernel's own
        enter-user-mode gate (clears PSR bit31, sets SR1/SNIP/SFIP, rte). */
-    u32 tramp = 0xC0F00000u;                  /* kernel VA hole: past text, below data */
+    u32 tramp = PROCEXP_TRAMP;                /* kernel VA hole: past text, below data */
     u32 tpa = translate(tramp, 0);
     if (mem_r32(tpa) || mem_r32(tpa + 4)) {
         printf("  !! trampoline page %08x is not free\n", tramp);
@@ -435,6 +501,20 @@ int proc_experiment(void)
     mem_w32(tpa + 8,  0x58800000u);           /* or r4, r0,  0   ; flag  */
     mem_w32(tpa + 12, 0xC0000000u |           /* br _icode              */
                       (((0xC0016E30u - (tramp + 12)) >> 2) & 0x03FFFFFFu));
+    mem_w32(tpa + 0x20, 0xC0000000u);         /* br .  -- the idle sentinel */
+
+    /* We are about to abandon proc0 mid-flight.  When the process exits, the
+       kernel switches back to proc0 (its per-CPU idle thread) and load_contexts
+       a context nobody ever saved -- which is why execution used to wander off
+       into unmapped user VAs.  Snapshot proc0 properly with the kernel's own
+       save_context (c00173ec: stores r1 as the resume PC, r14..r31, the PSR at
+       +0x8c and the CPU number at +0xb4), then point its resume PC at the
+       sentinel spin so the emulator can see the process finish. */
+    u32 pctx = kr32(cur + P_CTX);
+    kcall(0xC00173ECu, pctx, 0, 0, 0, 0);
+    mem_w32(translate(pctx + 0x80, 0), PROCEXP_IDLE);
+    printf("  proc0 context %08x saved; it will resume at the idle sentinel %08x\n",
+           pctx, PROCEXP_IDLE);
 
     mem_w32(translate(ctx + 0x3c, 0), a.entry);   /* r15 = entry */
     mem_w32(translate(ctx + 0x40, 0), sp);        /* r16 = user sp */
