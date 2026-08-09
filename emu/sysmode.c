@@ -86,6 +86,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
             printf("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
                    (unsigned long long)cpu.count);
+            if (vmexp) { vm_experiment(); break; }      /* step-2 VM RPC probe */
             if (utest) { launch_utest(); continue; }   /* drop to user mode */
             break;
         }
@@ -290,6 +291,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
             for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
             putchar('\n');
         }
+    if (vmprobe) vm_probe_report();
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     if (!quiet_uproc) {
         printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);

@@ -46,6 +46,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--kmsg"))       kmsgs = 1;
         else if (!strcmp(argv[i], "--scsitrace"))  scsi_trace = 1;
         else if (!strcmp(argv[i], "--pchist"))     dump_pchist = 1;
+        else if (!strcmp(argv[i], "--vmprobe"))    vmprobe = 1;
+        else if (!strcmp(argv[i], "--vmexp"))      vmexp = 1;
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);

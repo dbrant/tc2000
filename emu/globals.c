@@ -71,6 +71,8 @@ u64 cmram_reads, cmram_writes;
 u8 **cmram_pages;                  /* dedicated CMRAM backing store */
 u32  watch_pc;
 int  dump_pchist;
+int  vmprobe;          /* --vmprobe: count kernel VM/fault entries (step-1 probe) */
+int  vmexp;            /* --vmexp: at boot-complete, drive kernel VM funcs via RPC */
 int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 int  interactive;      /* --shell: hand the terminal to /bin/sh */
 int  kmsgs;            /* --kmsg: echo the kernel's console output */

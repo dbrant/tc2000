@@ -3,6 +3,127 @@
    cross-module declarations live in nx88.h. */
 #include "nx88.h"
 
+/* ---- temporary VM-probe instrumentation (step-1 feasibility) ----
+   Count entries to the kernel's fault/VM machinery so we can see which of it is
+   actually alive during boot and under a running process.  --vmprobe enables it;
+   vm_probe_report() prints at halt.  Also logs the first few vm_map_fault calls
+   with their args and CPU mode, to see what the kernel is being asked to resolve. */
+typedef struct { u32 addr; const char *name; u64 count, first; } VmProbe;
+static VmProbe vmprobes[] = {
+    {0xC0016000u, "Xcodaccess",           0, 0},
+    {0xC0016180u, "Xdataccess",           0, 0},
+    {0xC0017788u, "trap",                 0, 0},
+    {0xC008B35Cu, "vm_map_fault",         0, 0},
+    {0xC0090B2Cu, "vm_map_fault_foreign", 0, 0},
+    {0xC0091224u, "pmap_enter",           0, 0},
+    {0xC008B5E8u, "pmap_expand",          0, 0},
+    {0xC004F9BCu, "vm_map_create",        0, 0},
+    {0xC0094984u, "vm_allocate",          0, 0},
+    {0xC00A6AB0u, "vm_page_alloc",        0, 0},
+    {0xC0094058u, "pmap_create",          0, 0},
+    {0xC0096610u, "vm_object_create",     0, 0},
+    {0xC00978FCu, "vnode_pager_init",     0, 0},
+    {0xC0017138u, "copyin",               0, 0},
+    {0xC00170F0u, "copyout",              0, 0},
+    /* process creation / exec / first-user-process bootstrap */
+    {0xC004D188u, "fork",                 0, 0},
+    {0xC0057474u, "fork1",                0, 0},
+    {0xC0057520u, "procdup",              0, 0},
+    {0xC005E5E4u, "vm_map_fork",          0, 0},
+    {0xC0078460u, "execve",               0, 0},
+    {0xC005E9B8u, "getxfile",             0, 0},
+    {0xC0016E30u, "icode(read)",          0, 0},
+};
+static u64 vmfault_logged;
+void vm_probe_tick(u32 pc)
+{
+    for (unsigned i = 0; i < sizeof vmprobes / sizeof vmprobes[0]; i++)
+        if (vmprobes[i].addr == pc) {
+            if (!vmprobes[i].count) vmprobes[i].first = cpu.count;
+            vmprobes[i].count++;
+            if (pc == 0xC008B35Cu && vmfault_logged < 12) {
+                vmfault_logged++;
+                printf("[vmflt] vm_map_fault r2=%08x r3=%08x r4=%08x mode=%s "
+                       "ret=%08x @%llu\n", RD(2), RD(3), RD(4),
+                       (cpu.cr[1] & 0x80000000u) ? "sup" : "USER", RD(1),
+                       (unsigned long long)cpu.count);
+            }
+            break;
+        }
+}
+void vm_probe_report(void)
+{
+    printf("=== VM probe: kernel VM/fault machinery calls ===\n");
+    for (unsigned i = 0; i < sizeof vmprobes / sizeof vmprobes[0]; i++)
+        printf("  %-22s %10llu   first@%llu\n", vmprobes[i].name,
+               (unsigned long long)vmprobes[i].count,
+               (unsigned long long)vmprobes[i].first);
+}
+
+/* ---- kernel-call RPC (step-2 real-exec scaffolding) ----
+   Invoke a kernel function from the emulator: snapshot the CPU, put a sentinel
+   in r1 as the return address and the args in r2..r5, run until the function
+   returns to the sentinel, read the result (r2), restore the CPU.  Guest MEMORY
+   changes persist -- that is the point: these functions allocate kernel
+   structures (pmaps, vm_maps, pages) we want to keep.  Meant to be used only at
+   a quiescent point (the swapper idle loop), in supervisor mode. */
+#define KCALL_RET 0x00DEAD00u
+u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
+{
+    CPU save = cpu;
+    WR(1, KCALL_RET);
+    WR(2, a2); WR(3, a3); WR(4, a4); WR(5, a5); WR(6, a6);
+    cpu.pc = fn;
+    cpu.has_pending = 0;
+    u64 guard = 0;
+    int trapped = 0;
+    while (cpu.pc != KCALL_RET && guard++ < 30000000ull)
+        if (step()) { trapped = 1; break; }
+    u32 ret = RD(2);
+    int returned = (cpu.pc == KCALL_RET);
+    u32 tv = trap_vector, tp = dbg_pc;
+    u64 used = guard;
+    cpu = save;
+    if (returned)
+        printf("  [kcall %08x] -> %08x  (%llu steps)\n", fn, ret,
+               (unsigned long long)used);
+    else
+        printf("  [kcall %08x] DID NOT RETURN (%s pc=%08x vec=%d, %llu steps)\n",
+               fn, trapped ? "trap" : "runaway", tp, (int)tv,
+               (unsigned long long)used);
+    return returned ? ret : 0xFFFFFFFFu;
+}
+
+/* First real-exec experiment: build a fresh user address space with the kernel's
+   own VM primitives, purely to prove the RPC path and that these functions run
+   standalone at the idle point. */
+void vm_experiment(void)
+{
+    printf("=== VM experiment: driving kernel VM functions via RPC ===\n");
+    /* Reference: the kernel's currently-active supervisor APR (its segment-table
+       root), so we can recognise a segment-table-shaped value in the pmap. */
+    u32 sapr = mem_r32(0xFFF7E000u + CMMU_SAPR);
+    printf("  (kernel SAPR = %08x)\n", sapr);
+
+    /* Proven: the kernel's own VM allocators run standalone via RPC and return
+       real structures.  This is the toolkit for building a real user address
+       space; the remaining RE is the pmap->segment-table/APR relationship and
+       the Mach VM call signatures (pmap_enter's 2nd arg is a pointer, not a raw
+       VA). */
+    u32 pmap = kcall(0xC0094058u, 0, 0, 0, 0, 0);           /* pmap_create(0)   */
+    printf("  pmap_create(0)         = %08x\n", pmap);
+    if (pmap < 0xC0000000u || pmap == 0xFFFFFFFFu) return;
+    printf("  pmap struct:");
+    for (u32 i = 0; i < 24; i++) {
+        if (i % 6 == 0) printf("\n    +0x%02x:", i * 4);
+        printf(" %08x", mem_r32(translate(pmap + i * 4, 0)));
+    }
+    printf("\n");
+
+    u32 map = kcall(0xC004F9BCu, pmap, 0, 0x80000000u, 1, 0); /* vm_map_create  */
+    printf("  vm_map_create(pmap)    = %08x\n", map);
+}
+
 u32 do_cmp(u32 a, u32 b)
 {
     s32 sa = (s32)a, sb = (s32)b;
@@ -132,6 +253,7 @@ int step(void)
 {
     u32 pc = cpu.pc;
     dbg_pc = pc; dbg_count = cpu.count;
+    if (vmprobe) vm_probe_tick(pc);
 
     /* SHA I/O wait: complete synchronously and return from tsleep as if woken.
        sleep_and_unlock releases the caller's lock (3rd arg, r4) on the normal
