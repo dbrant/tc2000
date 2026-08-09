@@ -269,7 +269,7 @@ u32 translate(u32 va, int code)
     u32 pa;
     if (!walk_fb(apr, va, code, &pa)) {
         /* Demand paging for our synthetic user space.  The kernel's VM has no
-           idea this address space exists, so a real vector-2 fault would find
+           idea this address space exists, so a real access fault would find
            no vm_map entry; instead we do what the pager would: hand out a
            zeroed page and map it.  This is what lets obreak's heap growth and
            deep stacks actually be touchable. */
@@ -278,13 +278,15 @@ u32 translate(u32 va, int code)
         /* A real user process (--procexp) faults: the kernel's exec maps its
            image demand-paged, so the first touch of every page misses here.
            Record it and abort the instruction; run_sys resolves it through the
-           kernel's own paging path and re-executes.  (A faithful MC88100 would
-           deliver vector 1/2 to _Xcodaccess/_Xdataccess instead -- same hook,
-           see the note in run_sys.) */
+           kernel's own paging path and re-executes.  Under --hwfault the same
+           hook delivers a real vector 2 (code) / 3 (data) access fault to the
+           kernel instead -- see deliver_fault and the note in run_sys. */
         if (procexp && !ufault_pending) {
             ufault_pending = 1;
             ufault_va = va;
             ufault_code = code;
+            ufault_write = 0;      /* memop() refines these for data accesses */
+            ufault_width = 4;
             ufault_pc = cpu.pc;
             return 0;
         }

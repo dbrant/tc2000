@@ -61,8 +61,9 @@ typedef uint64_t u64;
 #define CMMU_SCR  0x004
 #define CMMU_SSR  0x008
 #define CMMU_SAR  0x00C
-#define CMMU_PFSR 0x104
-#define CMMU_PFAR 0x108
+#define CMMU_SCTR 0x104
+#define CMMU_PFSR 0x108
+#define CMMU_PFAR 0x10C
 #define CMMU_SAPR 0x200
 #define CMMU_UAPR 0x204
 #define CODE_SEGTAB 0xE0790000u
@@ -183,6 +184,8 @@ extern u32 kdata_va, kdata_off;
 extern int ufault_pending;
 extern u32 ufault_va, ufault_pc;
 extern int ufault_code;
+extern int ufault_write;
+extern u32 ufault_width;
 extern u64 ufaults;
 extern u64 kdis_n, kfall_n;
 extern u32 ktab_bias;
@@ -368,7 +371,7 @@ u32 translate(u32 va, int code);
 void dev_write32(u32 a, u32 v);
 void deliver_exception(u32 vector);
 void deliver_trap(u32 vector, u32 tpc);
-void deliver_fault(u32 vector, u32 pc, u32 va, int code);
+void deliver_fault(u32 vector, u32 pc, u32 va, int code, int write, u32 width);
 extern int hwfault;
 void sha_complete(void);
 void sha_sdcomplete(u32 cmd);

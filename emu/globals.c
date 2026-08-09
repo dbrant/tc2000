@@ -87,6 +87,8 @@ int  hwfault;          /* --hwfault: deliver real MC88100 access faults */
 int  ufault_pending;   /* a real process faulted; run_sys pages it in and retries */
 u32  ufault_va, ufault_pc;
 int  ufault_code;
+int  ufault_write;     /* the faulting access was a store (or xmem) */
+u32  ufault_width;     /* its width in bytes (1/2/4/8) */
 u64  ufaults;
 u64  kdis_n, kfall_n;  /* kernel-VA table/linear disagreements; table misses */
 u64  kdis_unused;           /* kernel VAs where table and linear map disagree */

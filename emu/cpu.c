@@ -10,8 +10,12 @@
    with their args and CPU mode, to see what the kernel is being asked to resolve. */
 typedef struct { u32 addr; const char *name; u64 count, first; } VmProbe;
 static VmProbe vmprobes[] = {
-    {0xC0016000u, "Xcodaccess",           0, 0},
-    {0xC0016180u, "Xdataccess",           0, 0},
+    /* The symbol table's _X* names are shifted one slot: c0016000 is really
+       the interrupt handler, c0016180 _Xcodaccess, c0016190 _Xdataccess.
+       Named here by what they actually are (see deliver_fault). */
+    {0xC0016000u, "Xinterrupt",           0, 0},
+    {0xC0016180u, "Xcodaccess",           0, 0},
+    {0xC0016190u, "Xdataccess",           0, 0},
     {0xC0017788u, "trap",                 0, 0},
     {0xC008B35Cu, "vm_map_fault",         0, 0},
     {0xC0090B2Cu, "vm_map_fault_foreign", 0, 0},
@@ -412,9 +416,14 @@ int proc_experiment(void)
     if (procexec) a.entry = ubase;
     u32 stk_lo = procexec ? ubase + 0x2000u : STACK_TOP - 0x10000u;
     u32 stk_hi = procexec ? ubase + 0x4000u : STACK_TOP;
+    /* Note for the exec path: nX's user stack top is 0xBFFFE000, NOT
+       STACK_TOP.  exec pushes argv/envp there with a copyout, and the first
+       fault a real process takes is the `st.b` at c00171e4 storing to
+       0xBFFFDFE0.  Pre-mapping that range here does NOT help -- exec replaces
+       the address space, so anything mapped before it is discarded. */
     struct { u32 lo, hi; const char *what; } rng[2] = {
         { ubase, ubase + img_hi, procexec ? "stub" : "image" },
-        { stk_lo, stk_hi,      "stack" },
+        { stk_lo, stk_hi,        "stack" },
     };
     for (unsigned i = 0; i < 2; i++) {
         mem_w32(translate(slot, 0), rng[i].lo);
@@ -679,22 +688,64 @@ void deliver_trap(u32 vector, u32 tpc)
     cpu.has_pending = 0;                    /* abandon any pending delay slot  */
 }
 
-/* Deliver an MC88100 code/data ACCESS FAULT (vectors 1 and 2 -> _Xcodaccess
-   c0016000 / _Xdataccess c0016180).  Unlike deliver_trap, the faulting
-   instruction has NOT completed, so SXIP points at it and is VALID -- rte
-   resumes there and re-executes it once the mapping exists.
+/* Deliver an MC88100 ACCESS FAULT.  `vector` is the real MC88100 exception
+   vector number: 2 = instruction access, 3 = data access.  The kernel's
+   handlers are NOT where the symbol table says -- the whole _X* block from
+   c0016180 on is shifted by one entry, so the routine labelled `_Xdataccess`
+   (c0016180) is really _Xcodaccess and posts trap type 2, and the one labelled
+   `_Xmisaligned` (c0016190) is really _Xdataccess and posts type 3.  The trap
+   types the kernel switches on in `trap` (c00a9bd8) equal the vector numbers;
+   its own name table at 0xC100D740 spells them out ("Instruction Access
+   Exception" at 2, "Data Access Exception" at 3).
 
-   The data pipeline is reported EMPTY: nX's fpipe (c0016864) reads DMT0 (cr8)
-   and skips the whole DMT/DMD/DMA save when bit 0 is clear, so an empty
-   pipeline is a state it already handles and we do not have to model
-   transaction replay.  The faulting address goes in the CMMU's PFAR, with PFSR
-   marking a page fault, which is where the handler looks for it. */
-void deliver_fault(u32 vector, u32 pc, u32 va, int code)
+   The two vectors are resolved by completely different kernel paths:
+
+     vector 2 (code) is handled in trap()'s case at c00a9ff0, which vm_faults
+     the page containing SXIP.  Nothing else is needed from us.
+
+     vector 3 (data) does NOTHING in trap() -- its case just returns.  A data
+     fault is resolved earlier, in `exreturn` (c00aa3d4), called from the top of
+     trap() before the switch.  exreturn walks the saved data pipeline: it
+     gives up immediately unless DMT0 (frame+0x18) has its VALID bit set, takes
+     the fault address from DMA0 (frame+0x20), the read/write protection from
+     DMT0 & 0x1002, and calls vm_fault(map, addr & ~0x1fff, prot, 0, 0).  So a
+     data fault MUST arrive with a valid data-pipeline transaction or the
+     kernel has no idea what to page in.
+
+   The faulting instruction has not completed, so we describe exactly one
+   pending transaction and let the instruction re-execute on return (see the
+   SXIP/SNIP note below).  The kernel's own software replay of the transaction
+   (data_access_emulation, c00aaa44) is suppressed in step() -- our
+   re-execution does the access instead, and letting both run would perform a
+   partial-width store twice. */
+void deliver_fault(u32 vector, u32 pc, u32 va, int code, int write, u32 width)
 {
     u32 base = code ? 0xFFF7F000u : 0xFFF7E000u;
     mem_w32(base + CMMU_PFAR, va);
-    mem_w32(base + CMMU_PFSR, 0x00070000u);   /* fault code 7 = page fault */
+    /* PFSR fault code lives in bits 16-18; exreturn accepts 3-7 and routes
+       4, 5 and 7 to vm_fault.  5 = page fault is what a missing page is. */
+    mem_w32(base + CMMU_PFSR, 0x00050000u);
     cpu.cr[8] = cpu.cr[11] = cpu.cr[14] = 0;  /* DMT0/1/2: no transaction */
+    if (!code) {
+        /* DMT0: bit0 V, bit1 W, bits 2-5 byte enables, bits 7-11 destination
+           register, bit 13 double, bit 14 xmem.  The byte-enable encoding is
+           bit5 = the most significant byte lane down to bit2 = the least, as
+           data_access_emulation (c00aaa44) decodes it: 0x3c word, 0x30/0x0c
+           the two halfwords, 0x20/0x10/0x08/0x04 the four bytes.  It is only
+           ever read for the replay we suppress, but an accurate description
+           costs nothing and keeps the machine state coherent.  Destination
+           register 0: trapcommon restores r1..r31 from frame+0x40 and never
+           reads the r0 slot, so nothing can come of it. */
+        u32 benable;
+        switch (width) {
+        case 1:  benable = 0x20u >> (va & 3u); break;
+        case 2:  benable = (va & 2u) ? 0x0Cu : 0x30u; break;
+        default: benable = 0x3Cu; break;      /* 4, and 8 as its first half   */
+        }
+        cpu.cr[8]  = 1u | (write ? 2u : 0u) | benable;
+        cpu.cr[9]  = 0;                       /* DMD0: store data NOT modelled */
+        cpu.cr[10] = va;                      /* DMA0: the faulting address   */
+    }
     cpu.cr[2] = cpu.cr[1];                    /* EPSR = PSR at fault time     */
     /* SXIP must be INVALID: saveregs (c00167e8) clears SNIP, points SFIP at its
        continuation and rte's, relying on the first VALID pipeline register
@@ -743,6 +794,23 @@ int step(void)
     if (ctxtrace && pc == 0xC0017498u) ctx_tick();     /* load_context(ctx) */
     if (stwatch_pc) stwatch_tick(pc);
     if (regfind_val) regfind_tick(pc);
+
+    /* --hwfault: skip the kernel's software replay of the aborted data
+       transaction (data_access_emulation, c00aaa44, which exreturn calls once
+       vm_fault has made the page present).  Our fault model aborts the
+       faulting instruction before any register or byte of memory is touched
+       and re-executes it on return, so the access already happens exactly
+       once.  The replay reads its store data from DMD0, which we do not model
+       -- the very first fault of every exec is copyout's `st.b r5,[r3+r0]`
+       tail at c00171e4, and a replay of DMD0 = 0 would write a zero byte over
+       the argv string before the re-execution put the right one back.  It
+       would also turn a faulting xmem into an exchange performed twice.
+       Return 0 in r2; the caller ignores the value. */
+    if (hwfault && sysmode && pc == 0xC00AAA44u) {
+        cpu.pc = RD(1);
+        WR(2, 0);
+        return 0;
+    }
 
     /* SHA I/O wait: complete synchronously and return from tsleep as if woken.
        sleep_and_unlock releases the caller's lock (3rd arg, r4) on the normal

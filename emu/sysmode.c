@@ -248,14 +248,14 @@ int run_sys(const char *path, u64 limit, u32 sig)
             fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0; fd_watch_disk = 0;
         }
         if (ufault_pending) {
-            /* A real process touched a page its exec mapped demand-paged.  A
-               faithful MC88100 would vector to _Xcodaccess (c0016000, vector 1)
-               or _Xdataccess (c0016180, vector 2) with the data pipeline in
-               cr8-16; nX's fpipe skips that save entirely when DMT0 bit 0 is
-               clear, so that route is open -- but the handler still has to be
-               handed a fault address, so for now resolve it the way the kernel
-               itself would and re-execute: vm_map_pageable over the faulting
-               page on the current process's own map. */
+            /* A real process touched a page its exec mapped demand-paged.
+               --hwfault takes the faithful route below (vector 2/3 to the
+               kernel's own handlers).  Without it, resolve the fault the way
+               the kernel would and re-execute: vm_map_pageable over the
+               faulting page on the current process's own map.  That cannot do
+               copy-on-write -- vm_map_pageable(wire) reports success on a COW
+               entry without materialising the page -- which is what --hwfault
+               exists to fix. */
             /* This kernel's VM granularity is 8K everywhere (vm_allocate,
                vm_map_u_area_create, and pmap_enter's descriptor pairs), so
                resolve a whole 8K block -- asking it to wire a 4K sub-range
@@ -270,9 +270,15 @@ int run_sys(const char *path, u64 limit, u32 sig)
                paging -- vm_map_pageable reports success on a COW entry without
                materialising the page. */
             if (hwfault) {
-                ufaults++;
-                deliver_fault(ufault_code ? 1u : 2u, cpu.pc, ufault_va,
-                              ufault_code);
+                if (ufaults++ < 12)
+                    printf("[hwfault] %08x (%s%s) pc=%08x %s @%llu\n", ufault_va,
+                           ufault_code ? "code" : "data",
+                           ufault_code ? "" : (ufault_write ? " write" : " read"),
+                           ufault_pc,
+                           (cpu.cr[1] & 0x80000000u) ? "SUPERVISOR" : "user",
+                           (unsigned long long)cpu.count);
+                deliver_fault(ufault_code ? 2u : 3u, cpu.pc, ufault_va,
+                              ufault_code, ufault_write, ufault_width);
                 continue;
             }
             /* Run the kernel functions below on a KERNEL stack.  A fault taken

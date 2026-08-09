@@ -12,8 +12,16 @@ void memop(u32 sub, u32 D, u32 ea)
     if (wmem_hi || stwatch_active) wmem_tick(sub, D, ea);      /* --wmem: watch a VIRTUAL range */
     ea = translate(ea, 0);
     /* Page fault: abort before any memory or register is touched, so the
-       instruction can simply be re-executed once the page is there. */
-    if (ufault_pending) return;
+       instruction can simply be re-executed once the page is there.  Record
+       whether it was a store: --hwfault has to tell the kernel's vm_fault
+       which protection to fault the page in for, and only a WRITE fault
+       breaks a copy-on-write mapping.  0x08-0x0B are the stores, 0x00/0x01
+       are xmem (read-modify-write, so also a write). */
+    if (ufault_pending) {
+        ufault_write = (sub >= 0x08 && sub <= 0x0B) || sub <= 0x01;
+        ufault_width = memop_scale[sub];
+        return;
+    }
     if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 100000) {
         int st = (sub >= 0x08 && sub <= 0x0B);
         printf("[scsi] %-2s %08x sub=%x val=%08x pc=%08x @%llu\n",
