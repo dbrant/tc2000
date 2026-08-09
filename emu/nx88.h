@@ -61,6 +61,7 @@ typedef uint64_t u64;
 #define CMMU_SCR  0x004
 #define CMMU_SSR  0x008
 #define CMMU_SAR  0x00C
+#define CMMU_PFSR 0x104
 #define CMMU_PFAR 0x108
 #define CMMU_SAPR 0x200
 #define CMMU_UAPR 0x204
@@ -180,7 +181,7 @@ extern u64 kwalk_user;
 extern int dataphys;
 extern u32 kdata_va, kdata_off;
 extern int ufault_pending;
-extern u32 ufault_va;
+extern u32 ufault_va, ufault_pc;
 extern int ufault_code;
 extern u64 ufaults;
 extern u64 kdis_n, kfall_n;
@@ -194,6 +195,8 @@ void vm_experiment(void);
 int  proc_experiment(void);
 extern int procexp;
 extern int procexec;
+extern u32 procexp_cluster;
+extern u32 procexp_pid;
 extern int quiet_uproc;
 extern int interactive;
 extern int kmsgs;
@@ -365,6 +368,8 @@ u32 translate(u32 va, int code);
 void dev_write32(u32 a, u32 v);
 void deliver_exception(u32 vector);
 void deliver_trap(u32 vector, u32 tpc);
+void deliver_fault(u32 vector, u32 pc, u32 va, int code);
+extern int hwfault;
 void sha_complete(void);
 void sha_sdcomplete(u32 cmd);
 void sd_ensure_label(void);

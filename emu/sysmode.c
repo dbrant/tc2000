@@ -106,8 +106,60 @@ int run_sys(const char *path, u64 limit, u32 sig)
         /* --procexp: the process has exited and the kernel switched back to
            proc0, which we parked on a br-to-self.  Report and stop. */
         if (procexp && cpu.pc == PROCEXP_IDLE) {
-            printf("[procexp] process exited; kernel switched back to proc0 "
-                   "@%llu\n", (unsigned long long)cpu.count);
+            /* CPU 0 has nothing to run.  The kernel believes it has 64
+               processors, so a fork inside our logical cluster queues the child
+               on ANOTHER node's run queue -- and that node's CPU never executes
+               here.  Stand in for it: dispatch any still-runnable proc from our
+               own cluster, whatever node it was queued on.  Only procs in our
+               cluster are eligible, which excludes the boot's 64 idle threads
+               (all cluster 0). */
+            u32 pb = mem_r32(translate(0xC1015758u, 0));
+            u32 np = mem_r32(translate(0xC1014B80u, 0));
+            u32 pick = 0, pickpid = 0;
+            for (u32 i = 0; procexp_cluster && pb && i < np; i++) {
+                u32 q = pb + i * 512u;
+                if (mem_r32(translate(q + 0x40u, 0)) != 3u ||
+                    mem_r32(translate(q + 0x90u, 0)) != procexp_cluster)
+                    continue;
+                /* Highest pid first: that is the newest process, i.e. the child
+                   a fork just made, rather than init sitting runnable since
+                   boot on a node whose CPU never runs. */
+                u32 pid = mem_r32(translate(q + 0x4Cu, 0)) >> 16;
+                if (pid < procexp_pid) continue;   /* ours and its children only */
+                if (pid >= pickpid) { pickpid = pid; pick = q; }
+            }
+            if (pick) {
+                u32 ctx = mem_r32(translate(pick + 0xC8u, 0));
+                printf("[procexp] dispatching proc %08x (pid %u, node %u) "
+                       "@%llu\n", pick,
+                       mem_r32(translate(pick + 0x4Cu, 0)) >> 16,
+                       mem_r32(translate(pick + 0x7Cu, 0)),
+                       (unsigned long long)cpu.count);
+                /* Re-home it to node 0.  fork inside a multi-node cluster puts
+                   the child on another node, and the kernel checks that a proc
+                   runs on its home node ("acallpsig not on home node",
+                   c00aba7c: proc+0x7c vs the CPU's node at [0xC0014008]).  We
+                   only ever execute node 0's CPU, so make node 0 its home; the
+                   memory it was given on the other node is still just memory. */
+                mem_w32(translate(pick + 0x7Cu, 0), 0);
+                mem_w32(translate(ctx + 0xB4u, 0), 0);
+                mem_w32(translate(0xFBFFE0F0u, 0), pick);   /* curproc */
+                WR(2, ctx);
+                cpu.pc = 0xC0017498u;                       /* load_context */
+                continue;
+            }
+            printf("[procexp] all our processes exited @%llu\n",
+                   (unsigned long long)cpu.count);
+            if (!verbose_sys) break;
+            for (u32 i = 0, shown = 0; pb && i < np && shown < 12; i++) {
+                u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
+                if (!st) continue;
+                shown++;
+                printf("    proc %08x #%-4u pid %-5u stat %u node %u clu %u\n",
+                       q, i, mem_r32(translate(q + 0x4Cu, 0)) >> 16, st,
+                       mem_r32(translate(q + 0x7Cu, 0)),
+                       mem_r32(translate(q + 0x90u, 0)));
+            }
             break;
         }
         /* halt catcher: _tcs_shutdown+0x38 and _doadump+0x20 are br-to-self
@@ -212,6 +264,29 @@ int run_sys(const char *path, u64 limit, u32 sig)
             u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
             u32 map = cp ? mem_r32(translate(cp + 0xD4u, 0)) : 0;
             ufault_pending = 0;
+            /* --hwfault: hand it to the kernel's own handler instead of
+               resolving it ourselves.  This is the faithful path and the only
+               one that can do copy-on-write (a forked child's text) or vnode
+               paging -- vm_map_pageable reports success on a COW entry without
+               materialising the page. */
+            if (hwfault) {
+                ufaults++;
+                deliver_fault(ufault_code ? 1u : 2u, cpu.pc, ufault_va,
+                              ufault_code);
+                continue;
+            }
+            /* Run the kernel functions below on a KERNEL stack.  A fault taken
+               in user mode leaves r31 pointing at the USER stack, and kcall
+               does not change it -- so vm_map_pageable's own prologue pushed
+               onto user memory, corrupting it, and eventually faulted itself
+               (pc=c0092354, its `st r1,[r31+0x34]`).  cr17/SR1 is the kernel
+               stack the trap path would have switched to; use that, and be in
+               supervisor mode while doing it. */
+            u32 sp0 = RD(31), psr0 = cpu.cr[1];
+            if (!(psr0 & 0x80000000u)) {
+                WR(31, cpu.cr[17]);
+                cpu.cr[1] = psr0 | 0x80000000u;
+            }
             int ok = map && !kcall(0xC0092350u, map, va, va + 0x2000u, 1, 0);
             if (!ok && map) {
                 /* Not in the map at all -- a stack that has to grow, which the
@@ -224,9 +299,12 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 ok = !kcall(0xC008EB6Cu, map, slot, 0x2000u, 0x90, 0xFFFFFFFFu)
                   && !kcall(0xC0092350u, map, va, va + 0x2000u, 1, 0);
             }
+            WR(31, sp0);                        /* back to the faulting context */
+            cpu.cr[1] = psr0;
             if (!ok) {
-                printf("[ufault] cannot page in %08x (%s) for proc %08x @%llu\n",
-                       ufault_va, ufault_code ? "code" : "data", cp,
+                printf("[ufault] cannot page in %08x (%s) from pc=%08x for "
+                       "proc %08x @%llu\n", ufault_va,
+                       ufault_code ? "code" : "data", ufault_pc, cp,
                        (unsigned long long)cpu.count);
                 break;
             }

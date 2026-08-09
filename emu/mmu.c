@@ -285,6 +285,7 @@ u32 translate(u32 va, int code)
             ufault_pending = 1;
             ufault_va = va;
             ufault_code = code;
+            ufault_pc = cpu.pc;
             return 0;
         }
         xlat_faults++;

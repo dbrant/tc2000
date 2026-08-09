@@ -51,6 +51,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--ctxtrace"))   ctxtrace = 1;
         else if (!strcmp(argv[i], "--procexp"))    procexp = 1;
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
+        else if (!strcmp(argv[i], "--hwfault"))    hwfault = 1;
         else if (!strcmp(argv[i], "--procexec"))   { procexp = 1; procexec = 1; }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
@@ -73,6 +74,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "sys"))  mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
+    }
+    /* --procexec runs the kernel's own exec, which needs kernel memory to be
+       coherent -- so it implies --dataphys.  It also defaults the machine to a
+       genuinely single node: with 64 nodes the kernel puts every forked child
+       on another node's run queue, which no CPU here executes, and the emulator
+       has to stand in for the missing processors.  One node keeps forks local
+       AND boots 15x faster (3.7M instructions instead of 55M).  An explicit
+       --nodes=N still wins. */
+    if (procexec) {
+        dataphys = 1;
+        if (!cfg_nodes) cfg_nodes = 1;
     }
     if (nwords) path = words[0];
     if (!path) {

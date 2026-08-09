@@ -73,6 +73,8 @@ u32  watch_pc;
 int  dump_pchist;
 int  vmprobe;          /* --vmprobe: count kernel VM/fault entries (step-1 probe) */
 int  vmexp;            /* --vmexp: at boot-complete, drive kernel VM funcs via RPC */
+u32  procexp_cluster;  /* logical cluster our real process runs in */
+u32  procexp_pid;      /* its pid: only it and its descendants get dispatched */  /* the logical cluster our real process runs in */
 int  procexec;        /* --procexec: let the kernel's own execve load the binary */
 int  procexp;         /* --procexp: create a real proc with the kernel's newproc */
 int  ctxtrace;         /* --ctxtrace: log every distinct load_context() context */
@@ -81,8 +83,9 @@ u64  wmem_max = 400;
 u64  kwalk_user;       /* user-space walks resolved through the kernel's real tables */
 int  dataphys;         /* --dataphys: load kernel data at the PA nX expects */
 u32  kdata_va, kdata_off;  /* start VA and VA-PA offset of that region */
+int  hwfault;          /* --hwfault: deliver real MC88100 access faults */
 int  ufault_pending;   /* a real process faulted; run_sys pages it in and retries */
-u32  ufault_va;
+u32  ufault_va, ufault_pc;
 int  ufault_code;
 u64  ufaults;
 u64  kdis_n, kfall_n;  /* kernel-VA table/linear disagreements; table misses */

@@ -287,6 +287,7 @@ int proc_experiment(void)
     u32 ctab = kr32(0xC1016D58u), clu = 0;
     for (u32 c = 2; ctab && c <= 3; c++)
         if (kr32(ctab + c * 0xB0u + 0x14u) == c) { clu = c; break; }
+    procexp_cluster = clu;
     printf("  cluster table @%08x: running in logical cluster %u%s\n", ctab, clu,
            clu ? "" : " (SYSTEM -- fork will panic)");
 
@@ -300,6 +301,7 @@ int proc_experiment(void)
     if (rc || p == head) { printf("  !! no new proc\n"); return 0; }
 
     if (clu) mem_w32(translate(p + 0x90u, 0), clu);   /* forkable cluster */
+    procexp_pid = kr32(p + P_PID) >> 16;
     u32 ctx = kr32(p + P_CTX);
     printf("  NEW PROC %08x = proc #%u, pid %u, stat %u, node %u, umap %08x\n",
            p, (p - base) / P_SIZE, kr32(p + P_PID) >> 16, kr32(p + P_STAT),
@@ -677,6 +679,37 @@ void deliver_trap(u32 vector, u32 tpc)
     cpu.has_pending = 0;                    /* abandon any pending delay slot  */
 }
 
+/* Deliver an MC88100 code/data ACCESS FAULT (vectors 1 and 2 -> _Xcodaccess
+   c0016000 / _Xdataccess c0016180).  Unlike deliver_trap, the faulting
+   instruction has NOT completed, so SXIP points at it and is VALID -- rte
+   resumes there and re-executes it once the mapping exists.
+
+   The data pipeline is reported EMPTY: nX's fpipe (c0016864) reads DMT0 (cr8)
+   and skips the whole DMT/DMD/DMA save when bit 0 is clear, so an empty
+   pipeline is a state it already handles and we do not have to model
+   transaction replay.  The faulting address goes in the CMMU's PFAR, with PFSR
+   marking a page fault, which is where the handler looks for it. */
+void deliver_fault(u32 vector, u32 pc, u32 va, int code)
+{
+    u32 base = code ? 0xFFF7F000u : 0xFFF7E000u;
+    mem_w32(base + CMMU_PFAR, va);
+    mem_w32(base + CMMU_PFSR, 0x00070000u);   /* fault code 7 = page fault */
+    cpu.cr[8] = cpu.cr[11] = cpu.cr[14] = 0;  /* DMT0/1/2: no transaction */
+    cpu.cr[2] = cpu.cr[1];                    /* EPSR = PSR at fault time     */
+    /* SXIP must be INVALID: saveregs (c00167e8) clears SNIP, points SFIP at its
+       continuation and rte's, relying on the first VALID pipeline register
+       being that continuation.  Leaving SXIP valid makes its rte jump straight
+       back to the faulting instruction and the handler is never reached.  The
+       resume point therefore lives in SNIP -- pointing at the faulting
+       instruction itself, so the eventual return re-executes it. */
+    cpu.cr[4] = pc;                           /* SXIP = faulting insn, INVALID */
+    cpu.cr[5] = pc | 2u;                      /* SNIP = resume here, VALID     */
+    cpu.cr[6] = (pc + 4u) | 2u;               /* SFIP                          */
+    cpu.cr[1] = cpu.cr[1] | 0x80000003u;      /* supervisor | IND | SFRZ      */
+    cpu.pc = cpu.cr[7] + vector * 8u;
+    cpu.has_pending = 0;
+}
+
 /* MC88100 floating point (SFU1, opcode 0x21).  Precision codes: 0=single
    (one register), 1=double (register pair rn:rn+1, high word in rn), 2=extended
    (unused by nX -- treated as double).  Values are carried internally as C
@@ -1005,6 +1038,10 @@ int step(void)
     }
 
     u32 w   = mem_r32(translate(pc, 1));
+    /* Instruction fetch faulted: there is no instruction to run.  Bail before
+       decoding -- otherwise the garbage word gets executed, and its operands
+       (a load from VA 0, typically) mask the real fault. */
+    if (ufault_pending) return 0;
     u32 op  = w >> 26;
     u32 D   = (w >> 21) & 31;
     u32 S1  = (w >> 16) & 31;
