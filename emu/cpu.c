@@ -226,16 +226,20 @@ static void dump_words(const char *what, u32 base, u32 n)
 }
 
 /* Walk an address space through the kernel's OWN tables.
-   The tables are real and fully populated, but they were built through kernel
-   VIRTUAL addresses while the APR names them physically, and in this emulator
-   those are different memory -- so the hardware walk sees nothing and every
-   translation falls back to the synthetic direct map.  pmap[0] is the segment
-   table's kernel VA and pmap[1] its physical address, so their difference is
-   the VA->PA bias for kernel table memory; apply it to reach the page tables
-   too.  Returns the physical frame the kernel intends for va. */
+   With --dataphys the tables are readable at the physical addresses the APR
+   names, so an ordinary hardware-shaped walk works and this is just mmu_walk.
+   Without it they are only reachable through the kernel VIRTUAL addresses they
+   were built at, so fall back to that: pmap[0] is the segment table's kernel VA
+   and pmap[1] its physical address, and their difference reaches the page
+   tables too.  Returns the physical frame the kernel intends for va. */
 static int kwalk(u32 pmap, u32 va, u32 *pa, u32 *sd_out, u32 *pd_out)
 {
     u32 stva = kr32(pmap), stpa = kr32(pmap + 4);
+    if (mmu_walk(stpa | 1u, va, pa)) {
+        if (sd_out) *sd_out = mem_r32(stpa + ((va >> 22) & 0x3FF) * 4);
+        if (pd_out) *pd_out = 0;
+        return 1;
+    }
     u32 bias = stva - stpa;                       /* kernel-table VA - PA */
     u32 sd = kr32(stva + ((va >> 22) & 0x3FF) * 4);
     if (sd_out) *sd_out = sd;
@@ -336,7 +340,11 @@ int proc_experiment(void)
     /* The walker must reach the kernel's tables where they really are before any
        of this proc's user VAs can resolve.  Set the bias first: the loader below
        writes through it. */
-    ktab_bias = (kr32(pmap) - KOFF) - kr32(pmap + 4);
+    /* Where the table really is, minus where the APR says it is.  Ask
+       translate() rather than assuming VA-KOFF: under --dataphys kernel space
+       resolves through the kernel's own tables and the two agree, so the bias
+       comes out zero and nothing is needed. */
+    ktab_bias = translate(kr32(pmap), 0) - kr32(pmap + 4);
     printf("  kernel table bias = %08x (table VA %08x, kernel PA %08x)\n",
            ktab_bias, kr32(pmap), kr32(pmap + 4));
 
@@ -467,21 +475,6 @@ int proc_experiment(void)
         for (unsigned i = 0; i < sizeof stub / 4; i++) uput32(pmap, i * 4, stub[i]);
         printf("  exec stub at VA 0: execve(\"%s\", argv@%08x, envp@%08x), sp=%08x\n",
                gpath, uargvp, uenvpp, sp);
-        /* The kernel translates user addresses in software (user_vtop, c00ab278)
-           by reading the page tables at the physical addresses IT believes in --
-           which this emulator does not honour, so copyin of the exec path fails
-           and execve never even runs.  Report it rather than hide it. */
-        u32 pa = 0; kwalk(pmap, upath, &pa, 0, 0);
-        u32 kv = kcall(0xC00AB278u, upath, 0, 0, 0, 0);
-        printf("  user_vtop(%08x) = %08x   (our walker: pa=%08x)\n", upath, kv, pa);
-        if (!(kv & ~0xFFFu)) {
-            printf("  !! the kernel cannot translate user memory, so execve's "
-                   "copyin fails and it never runs.\n"
-                   "     (Without this check the process just re-execs forever.)"
-                   "  Kernel-space page-table\n     coherence is the blocker -- "
-                   "run without --procexec to hand-load the image instead.\n");
-            return 0;
-        }
     }
 
     /* --- make it the running process, the kernel's own way ---
@@ -979,8 +972,10 @@ int step(void)
     }
 
     if (watch_pc && pc == watch_pc) {
-        printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x @%llu\n",
+        printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
+               "| r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
                pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6),
+               RD(23), RD(24), RD(25), RD(26), RD(27),
                (unsigned long long)cpu.count);
     }
 
@@ -1142,6 +1137,11 @@ int step(void)
     } else {
         goto badinsn;
     }
+
+    /* A user page fault aborts the instruction: memop bailed before touching
+       memory or a register, so leaving cpu.pc alone re-executes it once the
+       mapping exists.  Nothing else in this step is observable. */
+    if (ufault_pending) return 0;
 
     /* --- sequencing: delay slots are explicit --- */
     if (cpu.has_pending) {

@@ -11,6 +11,9 @@ void memop(u32 sub, u32 D, u32 ea)
     if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
     if (wmem_hi || stwatch_active) wmem_tick(sub, D, ea);      /* --wmem: watch a VIRTUAL range */
     ea = translate(ea, 0);
+    /* Page fault: abort before any memory or register is touched, so the
+       instruction can simply be re-executed once the page is there. */
+    if (ufault_pending) return;
     if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 100000) {
         int st = (sub >= 0x08 && sub <= 0x0B);
         printf("[scsi] %-2s %08x sub=%x val=%08x pc=%08x @%llu\n",

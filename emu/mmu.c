@@ -56,8 +56,13 @@ void boot_build_tables(void)
     };
     u32 koff = realmm ? KOFF : 0;
     /* kernel space: 0xC0000000-0xE0000000 -> PA 0-0x20000000 (realmm) or identity */
-    map_range_off(CODE_SEGTAB, 0xC0000000u, 0xE0000000u, koff);
-    map_range_off(DATA_SEGTAB, 0xC0000000u, 0xE0000000u, koff);
+    u32 dsplit = kdata_off ? kdata_va : 0xE0000000u;
+    map_range_off(CODE_SEGTAB, 0xC0000000u, dsplit, koff);
+    map_range_off(DATA_SEGTAB, 0xC0000000u, dsplit, koff);
+    if (kdata_off) {        /* data/bss and the heap above it sit lower */
+        map_range_off(CODE_SEGTAB, dsplit, 0xE0000000u, kdata_off);
+        map_range_off(DATA_SEGTAB, dsplit, 0xE0000000u, kdata_off);
+    }
     for (unsigned i = 0; i < sizeof devs / sizeof devs[0]; i++) {
         map_range(CODE_SEGTAB, devs[i][0], devs[i][1]);
         map_range(DATA_SEGTAB, devs[i][0], devs[i][1]);
@@ -161,8 +166,13 @@ int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
 
 void cmmu_command(u32 base, u32 cmd)
 {
-    /* 0x20/0x24 are the user/supervisor address-probe commands */
-    if (cmd != 0x20 && cmd != 0x24) return;
+    /* 0x20/0x24 are the user/supervisor address-probe commands; everything else
+       is a cache/TLB invalidate.  Those used to be ignorable because kernel VAs
+       bypassed the TLB entirely (a hardcoded direct map), but once kernel space
+       is resolved through the kernel's own page tables a stale entry survives a
+       PTE change and the kernel reads memory that has moved.  Flush
+       conservatively -- correctness first; the TLB refills immediately. */
+    if (cmd != 0x20 && cmd != 0x24) { tlb_flush(); return; }
     u32 vaddr = mem_r32(base + CMMU_SAR);
     u32 apr   = mem_r32(base + (cmd == 0x24 ? CMMU_SAPR : CMMU_UAPR));
     int is_code = (base == 0xFFF7F000u);
@@ -206,6 +216,38 @@ u32 translate(u32 va, int code)
         if (va >= 0xE0000000u) return va;
         u32 dp = devmap_lookup(va & ~0xFFFu);
         if (dp) return dp | (va & 0xFFF);
+        /* --dataphys: the data segment is loaded at the physical address nX
+           itself believes in -- right after text, not VA-KOFF.  Once that holds,
+           the kernel's OWN page tables are readable at the physical addresses
+           its APR names, so they become the truth for kernel space too; the
+           linear map is only the bootstrap fallback for VAs they do not cover
+           yet.  Without this, pages the kernel allocates from its physical page
+           allocator (whose PAs follow no linear rule) are unreachable and it
+           panics in its own vtop.  Cached in the TLB -- a walk on every kernel
+           access would cost far too much. */
+        if (kdata_off) {
+            u32 lin = va >= kdata_va ? va - kdata_off : va - KOFF;
+            u32 vpn = va >> 12, idx = vpn & (TLB_SIZE - 1);
+            if (tlb[code][idx].tag == (vpn | 0x80000000u))
+                return tlb[code][idx].pa | (va & 0xFFF);
+            u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
+            u32 pa;
+            if (!(apr & 1) || !mmu_walk(apr, va, &pa)) {
+                /* The kernel's table does not cover this VA, so we have to guess
+                   with the linear map -- and a VA that later BECOMES covered is
+                   then read from somewhere else than it was written.  That is
+                   the corruption; count it. */
+                if (kfall_n++ < 10)
+                    printf("[kfall] kernel VA %08x not in the kernel's table, "
+                           "using linear %08x  pc=%08x @%llu\n",
+                           va, lin, cpu.pc, (unsigned long long)cpu.count);
+                return lin;
+            }
+            if (pa != lin) kdis_n++;
+            tlb[code][idx].tag = vpn | 0x80000000u;
+            tlb[code][idx].pa  = pa & 0xFFFFF000u;
+            return pa;
+        }
         return va - KOFF;
     }
 
@@ -233,6 +275,18 @@ u32 translate(u32 va, int code)
            deep stacks actually be touchable. */
         u32 dp = udemand_page(apr, va);
         if (dp) return dp | (va & 0xFFF);
+        /* A real user process (--procexp) faults: the kernel's exec maps its
+           image demand-paged, so the first touch of every page misses here.
+           Record it and abort the instruction; run_sys resolves it through the
+           kernel's own paging path and re-executes.  (A faithful MC88100 would
+           deliver vector 1/2 to _Xcodaccess/_Xdataccess instead -- same hook,
+           see the note in run_sys.) */
+        if (procexp && !ufault_pending) {
+            ufault_pending = 1;
+            ufault_va = va;
+            ufault_code = code;
+            return 0;
+        }
         xlat_faults++;
         last_fault_va = va;
         last_fault_pc = cpu.pc;

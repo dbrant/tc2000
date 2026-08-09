@@ -14,6 +14,18 @@ int run_sys(const char *path, u64 limit, u32 sig)
     /* realmm loads at true physical addresses (VA - KOFF); otherwise identity */
     u32 tload = realmm ? TEXT_BASE - KOFF : TEXT_BASE;
     u32 dload = realmm ? DATA_BASE - KOFF : DATA_BASE;
+    /* --dataphys: nX links its data at VA 0xC1000000 but expects it loaded
+       PHYSICALLY right after text.  Its own numbers say so: the kernel map's
+       page tables live at VA 0xC103E000 and its APR names PA 0x00110000 -- a
+       difference of exactly DATA_BASE - (tload + text), and 0x110000 is the
+       first page past data+bss under that layout, i.e. where its early physical
+       allocator starts.  With data at the wrong PA the kernel's tables are
+       unreachable physically and every walk falls back to the synthetic map. */
+    if (realmm && dataphys) {
+        dload = tload + a.text;
+        kdata_va = DATA_BASE;
+        kdata_off = DATA_BASE - dload;
+    }
     mem_load(tload, a.img + HDR_PAGE, a.text);
     mem_load(dload, a.img + HDR_PAGE + a.text, a.data);
     mem_zero(dload + a.data, a.bss);
@@ -183,6 +195,40 @@ int run_sys(const char *path, u64 limit, u32 sig)
             }
             fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0; fd_watch_disk = 0;
         }
+        if (ufault_pending) {
+            /* A real process touched a page its exec mapped demand-paged.  A
+               faithful MC88100 would vector to _Xcodaccess (c0016000, vector 1)
+               or _Xdataccess (c0016180, vector 2) with the data pipeline in
+               cr8-16; nX's fpipe skips that save entirely when DMT0 bit 0 is
+               clear, so that route is open -- but the handler still has to be
+               handed a fault address, so for now resolve it the way the kernel
+               itself would and re-execute: vm_map_pageable over the faulting
+               page on the current process's own map. */
+            u32 va = ufault_va & ~0xFFFu;
+            u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
+            u32 map = cp ? mem_r32(translate(cp + 0xD4u, 0)) : 0;
+            ufault_pending = 0;
+            int ok = map && !kcall(0xC0092350u, map, va, va + PAGE_SIZE, 1, 0);
+            if (!ok && map) {
+                /* Not in the map at all -- a stack that has to grow, which the
+                   kernel's own fault path would do for us.  Extend it with the
+                   kernel's vm_allocate at that exact page, then wire it.
+                   proc+0xe0 is a zero, unused word to hand vm_allocate as its
+                   in/out address. */
+                u32 slot = cp + 0xE0u;
+                mem_w32(translate(slot, 0), va);
+                ok = !kcall(0xC008EB6Cu, map, slot, PAGE_SIZE, 0x90, 0xFFFFFFFFu)
+                  && !kcall(0xC0092350u, map, va, va + PAGE_SIZE, 1, 0);
+            }
+            if (!ok) {
+                printf("[ufault] cannot page in %08x (%s) for proc %08x @%llu\n",
+                       ufault_va, ufault_code ? "code" : "data", cp,
+                       (unsigned long long)cpu.count);
+                break;
+            }
+            ufaults++;
+            continue;                       /* pc unchanged: re-execute */
+        }
         if (step()) {
             /* Faithful userland: deliver real synchronous traps (syscalls via
                vector 128, page faults via vector 2, etc.) to the kernel's own
@@ -301,6 +347,8 @@ int run_sys(const char *path, u64 limit, u32 sig)
         }
     if (vmprobe) vm_probe_report();
     if (ctxtrace) ctx_report();
+    if (ufaults) printf("user page faults resolved through the kernel's VM: %llu\n",
+                        (unsigned long long)ufaults);
     if (ktab_bias) printf("user-space walks through the kernel's real tables: %llu\n",
                           (unsigned long long)kwalk_user);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;

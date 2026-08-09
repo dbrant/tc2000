@@ -79,6 +79,14 @@ int  ctxtrace;         /* --ctxtrace: log every distinct load_context() context 
 u32  wmem_lo, wmem_hi; /* --wmem=A[:L]: log stores into this virtual range */
 u64  wmem_max = 400;
 u64  kwalk_user;       /* user-space walks resolved through the kernel's real tables */
+int  dataphys;         /* --dataphys: load kernel data at the PA nX expects */
+u32  kdata_va, kdata_off;  /* start VA and VA-PA offset of that region */
+int  ufault_pending;   /* a real process faulted; run_sys pages it in and retries */
+u32  ufault_va;
+int  ufault_code;
+u64  ufaults;
+u64  kdis_n, kfall_n;  /* kernel-VA table/linear disagreements; table misses */
+u64  kdis_unused;           /* kernel VAs where table and linear map disagree */
 u32  ktab_bias;        /* emulator-PA - kernel-PA for kernel page-table memory */
 u32  stwatch_pc;       /* --stwatch=PC: log every store this function makes */
 u32  regfind_val;      /* --regfind=V: log where a GPR first holds V */
