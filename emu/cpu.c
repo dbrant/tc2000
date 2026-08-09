@@ -276,11 +276,30 @@ int proc_experiment(void)
            kr32(cur + P_PID) >> 16);
 
     u32 head = kr32(G_ALLPROC);
+    /* Which logical cluster to create the process in.  nX is cluster-based and
+       refuses to fork out of the SYSTEM cluster ("fork attempted in system
+       logical cluster", c004e154): the gate is cluster_table[c]+0x14, which
+       holds the cluster's own id and is therefore 0 only for cluster 0.  But
+       newproc ALSO switch-cases the cluster and panics "new process in a free
+       cluster" (c004e478) for 1, 4 and 5 -- only 2 and 3 are accepted.  So the
+       usable cluster is the first of 2,3 that the table agrees exists.
+       cluster_table base is [0xC1016D58], 0xb0 bytes per entry, 64 entries. */
+    u32 ctab = kr32(0xC1016D58u), clu = 0;
+    for (u32 c = 2; ctab && c <= 3; c++)
+        if (kr32(ctab + c * 0xB0u + 0x14u) == c) { clu = c; break; }
+    printf("  cluster table @%08x: running in logical cluster %u%s\n", ctab, clu,
+           clu ? "" : " (SYSTEM -- fork will panic)");
+
+    /* Create it in cluster 0: newproc for another cluster dispatches into that
+       cluster's processor and never returns to the kcall sentinel.  The proc's
+       own cluster id is just a field (newproc stores r4 at proc+0x90), so set
+       it afterwards -- that is what the fork gate actually reads. */
     u32 rc   = kcall(F_NEWPROC, 0, 0, 0, 0, 0);      /* newproc(-, node 0, -, -) */
     u32 p    = kr32(G_ALLPROC);
     printf("  newproc(node 0) rc=%u   allproc head %08x -> %08x\n", rc, head, p);
     if (rc || p == head) { printf("  !! no new proc\n"); return 0; }
 
+    if (clu) mem_w32(translate(p + 0x90u, 0), clu);   /* forkable cluster */
     u32 ctx = kr32(p + P_CTX);
     printf("  NEW PROC %08x = proc #%u, pid %u, stat %u, node %u, umap %08x\n",
            p, (p - base) / P_SIZE, kr32(p + P_PID) >> 16, kr32(p + P_STAT),
@@ -382,13 +401,18 @@ int proc_experiment(void)
         dataddr  = txtaddr + ((a.text + 4095) & ~4095u);
         datoff   = txtoff + a.text;
         img_hi   = (dataddr + a.data + a.bss + 0x1FFFu) & ~0x1FFFu;
-    } else {
-        a.entry = 0;
     }
-    u32 stk_lo = STACK_TOP - 0x10000u;
+    /* The exec stub must not sit where the image it execs will land.  nX puts
+       user text at VA 0 and (as the exec'd programs' own faults show) the stack
+       around 0x3FFF****, so park the stub and its scratch stack at 0x20000000,
+       clear of both.  A hand-loaded image, by contrast, IS the text at VA 0. */
+    u32 ubase = procexec ? 0x20000000u : 0x00000000u;
+    if (procexec) a.entry = ubase;
+    u32 stk_lo = procexec ? ubase + 0x2000u : STACK_TOP - 0x10000u;
+    u32 stk_hi = procexec ? ubase + 0x4000u : STACK_TOP;
     struct { u32 lo, hi; const char *what; } rng[2] = {
-        { 0x00000000u, img_hi, procexec ? "stub" : "image" },
-        { stk_lo, STACK_TOP,   "stack" },
+        { ubase, ubase + img_hi, procexec ? "stub" : "image" },
+        { stk_lo, stk_hi,      "stack" },
     };
     for (unsigned i = 0; i < 2; i++) {
         mem_w32(translate(slot, 0), rng[i].lo);
@@ -424,7 +448,7 @@ int proc_experiment(void)
     /* Arguments on the process's own stack: strings, then the argv/envp arrays.
        Hand-loaded images additionally get argc in front, which is what crt0
        unpacks; the exec stub passes the arrays to execve instead. */
-    u32 sp = STACK_TOP, sptr[MAX_UARGV + MAX_UENVP + 2];
+    u32 sp = stk_hi, sptr[MAX_UARGV + MAX_UENVP + 2];
     unsigned ns = 0;
     const char *dfl_av[1] = { "prog" };
     const char **av = nuargv ? (const char **)uargv : dfl_av;
@@ -472,7 +496,8 @@ int proc_experiment(void)
                                               space */
     };
     if (procexec) {
-        for (unsigned i = 0; i < sizeof stub / 4; i++) uput32(pmap, i * 4, stub[i]);
+        for (unsigned i = 0; i < sizeof stub / 4; i++)
+            uput32(pmap, ubase + i * 4, stub[i]);
         printf("  exec stub at VA 0: execve(\"%s\", argv@%08x, envp@%08x), sp=%08x\n",
                gpath, uargvp, uenvpp, sp);
     }

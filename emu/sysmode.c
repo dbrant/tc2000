@@ -204,11 +204,15 @@ int run_sys(const char *path, u64 limit, u32 sig)
                handed a fault address, so for now resolve it the way the kernel
                itself would and re-execute: vm_map_pageable over the faulting
                page on the current process's own map. */
-            u32 va = ufault_va & ~0xFFFu;
+            /* This kernel's VM granularity is 8K everywhere (vm_allocate,
+               vm_map_u_area_create, and pmap_enter's descriptor pairs), so
+               resolve a whole 8K block -- asking it to wire a 4K sub-range
+               splits entries and leaves the text page zero-filled. */
+            u32 va = ufault_va & ~0x1FFFu;
             u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
             u32 map = cp ? mem_r32(translate(cp + 0xD4u, 0)) : 0;
             ufault_pending = 0;
-            int ok = map && !kcall(0xC0092350u, map, va, va + PAGE_SIZE, 1, 0);
+            int ok = map && !kcall(0xC0092350u, map, va, va + 0x2000u, 1, 0);
             if (!ok && map) {
                 /* Not in the map at all -- a stack that has to grow, which the
                    kernel's own fault path would do for us.  Extend it with the
@@ -217,8 +221,8 @@ int run_sys(const char *path, u64 limit, u32 sig)
                    in/out address. */
                 u32 slot = cp + 0xE0u;
                 mem_w32(translate(slot, 0), va);
-                ok = !kcall(0xC008EB6Cu, map, slot, PAGE_SIZE, 0x90, 0xFFFFFFFFu)
-                  && !kcall(0xC0092350u, map, va, va + PAGE_SIZE, 1, 0);
+                ok = !kcall(0xC008EB6Cu, map, slot, 0x2000u, 0x90, 0xFFFFFFFFu)
+                  && !kcall(0xC0092350u, map, va, va + 0x2000u, 1, 0);
             }
             if (!ok) {
                 printf("[ufault] cannot page in %08x (%s) for proc %08x @%llu\n",
@@ -226,7 +230,21 @@ int run_sys(const char *path, u64 limit, u32 sig)
                        (unsigned long long)cpu.count);
                 break;
             }
-            ufaults++;
+            /* If the same page keeps faulting, the resolver did not actually
+               make it present -- stop instead of spinning forever. */
+            static u32 last_va; static unsigned repeat;
+            if (va == last_va) {
+                if (++repeat > 4) {
+                    printf("[ufault] %08x (%s) still faulting after %u "
+                           "resolutions -- giving up @%llu\n", ufault_va,
+                           ufault_code ? "code" : "data", repeat,
+                           (unsigned long long)cpu.count);
+                    break;
+                }
+            } else { last_va = va; repeat = 0; }
+            if (ufaults++ < 24)
+                printf("[ufault] %08x (%s) resolved\n", ufault_va,
+                       ufault_code ? "code" : "data");
             continue;                       /* pc unchanged: re-execute */
         }
         if (step()) {
