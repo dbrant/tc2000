@@ -48,6 +48,19 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pchist"))     dump_pchist = 1;
         else if (!strcmp(argv[i], "--vmprobe"))    vmprobe = 1;
         else if (!strcmp(argv[i], "--vmexp"))      vmexp = 1;
+        else if (!strcmp(argv[i], "--ctxtrace"))   ctxtrace = 1;
+        else if (!strcmp(argv[i], "--procexp"))    procexp = 1;
+        else if (!strncmp(argv[i], "--wmem=", 7)) {
+            char *e;
+            wmem_lo = (u32)strtoul(argv[i] + 7, &e, 0);
+            u32 len = (*e == ':') ? (u32)strtoul(e + 1, &e, 0) : 0x100u;
+            wmem_hi = wmem_lo + len;
+            if (*e == ':') wmem_max = strtoull(e + 1, 0, 0);
+        }
+        else if (!strncmp(argv[i], "--stwatch=", 10))
+            stwatch_pc = (u32)strtoul(argv[i] + 10, 0, 0);
+        else if (!strncmp(argv[i], "--regfind=", 10))
+            regfind_val = (u32)strtoul(argv[i] + 10, 0, 0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);

@@ -60,6 +60,89 @@ void vm_probe_report(void)
                (unsigned long long)vmprobes[i].first);
 }
 
+/* ---- empirical proc/thread-allocator hunt (step-2) ----
+   Symbol names in this kernel mislead (five false leads so far), so find the
+   real allocator by observation instead:
+
+     --ctxtrace   every distinct context the kernel ever load_context()s.  Those
+                  ARE the running threads, whatever they are called.
+     --wmem=A[:L] log every store into a virtual range, with the storing PC and
+                  r1 (a one-deep backtrace).  Point it at a context found above
+                  and the earliest writers are its allocator and initialiser.
+     --regfind=V  log the first times any GPR holds V -- i.e. where a pointer is
+                  first produced, which is the allocator's return point.
+   All three are off by default and cost one predictable branch when off. */
+#define KCTX_MAX 512
+static struct { u32 ctx; u64 first, n; u32 from; } kctx[KCTX_MAX];
+static unsigned nkctx;
+static u32 kr32(u32 va) { return mem_r32(translate(va, 0)); }
+
+void ctx_tick(void)
+{
+    u32 c = RD(2);
+    for (unsigned i = 0; i < nkctx; i++)
+        if (kctx[i].ctx == c) { kctx[i].n++; return; }
+    if (nkctx >= KCTX_MAX) return;
+    kctx[nkctx].ctx = c; kctx[nkctx].first = cpu.count;
+    kctx[nkctx].n = 1;   kctx[nkctx].from  = RD(1);
+    printf("[ctx] #%-3u %08x  pc=%08x sp=%08x kstk=%08x cmmu=%08x  from=%08x @%llu\n",
+           nkctx, c, kr32(c + 0x80), kr32(c + 0x7c), kr32(c + 0x98),
+           kr32(c + 0xa0), RD(1), (unsigned long long)cpu.count);
+    nkctx++;
+}
+
+void ctx_report(void)
+{
+    printf("=== load_context: %u distinct contexts ===\n", nkctx);
+    for (unsigned i = 0; i < nkctx; i++)
+        printf("  #%-3u %08x  switches=%-6llu first@%llu\n", i, kctx[i].ctx,
+               (unsigned long long)kctx[i].n, (unsigned long long)kctx[i].first);
+}
+
+/* store watch: called from memop() before translation, so the range is virtual.
+   Two modes: a virtual address range (--wmem), and "every store this function
+   makes" (--stwatch=PC), which answers "where does this routine actually write?"
+   without having to guess the address first. */
+static u64 wmem_n;
+int stwatch_active;
+static u32 stwatch_ret;
+static int stwatch_done;
+void stwatch_tick(u32 pc)
+{
+    if (!stwatch_done && !stwatch_active && pc == stwatch_pc) {
+        stwatch_active = 1; stwatch_ret = RD(1);
+        printf("[stw] enter %08x r2=%08x r3=%08x r4=%08x r5=%08x ret=%08x\n",
+               pc, RD(2), RD(3), RD(4), RD(5), stwatch_ret);
+    } else if (stwatch_active && pc == stwatch_ret) {
+        stwatch_active = 0; stwatch_done = 1;
+        printf("[stw] leave, r2=%08x\n", RD(2));
+    }
+}
+void wmem_tick(u32 sub, u32 D, u32 va)
+{
+    int inrange = (va >= wmem_lo && va < wmem_hi);
+    if (!inrange && !stwatch_active) return;
+    int store = (sub >= 0x08 && sub <= 0x0B) || sub <= 0x01;
+    if (!store) return;
+    if (wmem_n++ >= wmem_max) return;
+    printf("[wmem] %08x (+%-4d) <= %08x  pc=%08x r1=%08x r31=%08x @%llu\n",
+           va, (int)(va - wmem_lo), RD(D), dbg_pc, RD(1), RD(31),
+           (unsigned long long)cpu.count);
+}
+
+/* register-value watch: where does this pointer value first come from? */
+static u64 regfind_n;
+void regfind_tick(u32 pc)
+{
+    for (unsigned r = 2; r < 32; r++)
+        if (cpu.r[r] == regfind_val) {
+            if (regfind_n++ < 60)
+                printf("[rfind] r%-2u = %08x at pc=%08x r1=%08x @%llu\n",
+                       r, regfind_val, pc, RD(1), (unsigned long long)cpu.count);
+            return;
+        }
+}
+
 /* ---- kernel-call RPC (step-2 real-exec scaffolding) ----
    Invoke a kernel function from the emulator: snapshot the CPU, put a sentinel
    in r1 as the return address and the args in r2..r5, run until the function
@@ -92,6 +175,278 @@ u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
                fn, trapped ? "trap" : "runaway", tp, (int)tv,
                (unsigned long long)used);
     return returned ? ret : 0xFFFFFFFFu;
+}
+
+/* ---- the kernel's REAL process machinery ----
+   Found by runtime tracing, not by symbol name (every symbol below is wrong in
+   the a.out table; the kernel's own panic strings name them).  The chain, from
+   the boot that creates the 64 per-node idle threads:
+
+     proc_init   c004ef74  builds the per-node proc free lists: proc N lives at
+                           procbase + N*512, node = N / procs_per_node
+     alloc_proc  c004f148  pops procfree[node]  ("alloc_proc: global_proc_lock
+                           not held"); link field is proc+0x0c
+     newproc     c004e3b0  (unused, node, cluster, existing) -> 0 ok / 1 fail
+                           ("newproc to node %d cluster %d"): allocates the proc,
+                           assigns the pid, links allproc + pidhash, calls
+                           procdup, then do_setrq -- the new proc is RUNNABLE
+     procdup     c005e7a4  (new, parent, node): copies the parent's u-area map,
+                           then c004fa60 ("proc_create: no space for kernel
+                           stack") allocates the kernel stack from node memory
+                           and c00a46e0 zeroes the 0xF0-byte context at its base
+     load_context c0017498 (ctx) runs it
+
+   proc struct = 512 bytes; context = 0xF0 bytes at the base of the kernel
+   stack.  Fields used below were all confirmed against a live boot. */
+#define P_SIZE      512u
+#define P_LINK      0x0cu       /* free-list / allproc forward link */
+#define P_STAT      0x40u       /* 4 = SIDL, 3 = SRUN */
+#define P_PID       0x4cu       /* halfword */
+#define P_NODE      0x7cu
+#define P_UMAP      0xd4u       /* the u-area map from vm_map_u_area_copy */
+#define P_CTX       0xc8u       /* the 0xF0-byte context (= kernel stack base) */
+#define G_ALLPROC   0xC1015648u
+#define G_PROCBASE  0xC1015758u
+#define G_NPROC     0xC1014B80u
+#define G_PROCPERND 0xC10157E0u
+#define G_NNODES    0xC1014D40u
+#define G_NEXTPID   0xC1015A68u
+#define G_PROCINUSE 0xC1006B20u
+#define G_CURPROC   0xFBFFE0F0u     /* u.u_procp */
+#define F_NEWPROC   0xC004E3B0u
+
+static void dump_words(const char *what, u32 base, u32 n)
+{
+    printf("  %s @%08x:", what, base);
+    for (u32 i = 0; i < n; i++) {
+        if (i % 8 == 0) printf("\n    +0x%03x:", i * 4);
+        printf(" %08x", kr32(base + i * 4));
+    }
+    printf("\n");
+}
+
+/* Walk an address space through the kernel's OWN tables.
+   The tables are real and fully populated, but they were built through kernel
+   VIRTUAL addresses while the APR names them physically, and in this emulator
+   those are different memory -- so the hardware walk sees nothing and every
+   translation falls back to the synthetic direct map.  pmap[0] is the segment
+   table's kernel VA and pmap[1] its physical address, so their difference is
+   the VA->PA bias for kernel table memory; apply it to reach the page tables
+   too.  Returns the physical frame the kernel intends for va. */
+static int kwalk(u32 pmap, u32 va, u32 *pa, u32 *sd_out, u32 *pd_out)
+{
+    u32 stva = kr32(pmap), stpa = kr32(pmap + 4);
+    u32 bias = stva - stpa;                       /* kernel-table VA - PA */
+    u32 sd = kr32(stva + ((va >> 22) & 0x3FF) * 4);
+    if (sd_out) *sd_out = sd;
+    if (!(sd & 1)) return 0;
+    u32 ptva = (sd & 0x3FFFF000u) + bias;         /* strip the interleave mode */
+    u32 pd = kr32(ptva + ((va >> 12) & 0x3FF) * 4);
+    if (pd_out) *pd_out = pd;
+    if (!(pd & 1)) return 0;
+    *pa = (pd & 0xFFFFF000u) | (va & 0xFFF);
+    return 1;
+}
+
+/* Byte/word stores into a process's address space, through its own tables. */
+static void uput8(u32 pmap, u32 va, u8 v)
+{
+    u32 pa;
+    if (kwalk(pmap, va, &pa, 0, 0)) mem_w8(pa, v);
+}
+static void uput32(u32 pmap, u32 va, u32 v)
+{
+    for (int i = 0; i < 4; i++) uput8(pmap, va + i, (u8)(v >> (24 - i * 8)));
+}
+
+/* Create a real process with the kernel's own newproc(), at the swapper idle
+   point.  This is the step the synthetic proc1 model has always faked. */
+int proc_experiment(void)
+{
+    u32 base = kr32(G_PROCBASE), cur = kr32(G_CURPROC);
+    printf("=== proc experiment: the kernel's real process allocator ===\n");
+    printf("  procbase=%08x nproc=%u procs/node=%u nodes=%u inuse=%u "
+           "nextpid=%u\n  curproc=%08x (proc #%u, pid %u)\n",
+           base, kr32(G_NPROC), kr32(G_PROCPERND), kr32(G_NNODES),
+           kr32(G_PROCINUSE), kr32(G_NEXTPID), cur, (cur - base) / P_SIZE,
+           kr32(cur + P_PID) >> 16);
+
+    u32 head = kr32(G_ALLPROC);
+    u32 rc   = kcall(F_NEWPROC, 0, 0, 0, 0, 0);      /* newproc(-, node 0, -, -) */
+    u32 p    = kr32(G_ALLPROC);
+    printf("  newproc(node 0) rc=%u   allproc head %08x -> %08x\n", rc, head, p);
+    if (rc || p == head) { printf("  !! no new proc\n"); return 0; }
+
+    u32 ctx = kr32(p + P_CTX);
+    printf("  NEW PROC %08x = proc #%u, pid %u, stat %u, node %u, umap %08x\n",
+           p, (p - base) / P_SIZE, kr32(p + P_PID) >> 16, kr32(p + P_STAT),
+           kr32(p + P_NODE), kr32(p + P_UMAP));
+    printf("  its context %08x: resume pc=%08x sp=%08x kstack=%08x cmmu=%08x\n",
+           ctx, kr32(ctx + 0x80), kr32(ctx + 0x7c), kr32(ctx + 0x98),
+           kr32(ctx + 0xa0));
+    dump_words("proc", p, 64);
+    dump_words("context", ctx, 60);
+
+    /* Address space.  initial_context(map) (c008f55c) is just `return
+       map->pmap` -- a one-instruction accessor -- so P+0xd4 is a vm_map and
+       map+0x50 is its pmap.  The boot sets ctx+0xa0 = pmap[0] and
+       ctx+0xa4 = pmap[1] | 1, and pmap[1]|1 has exactly the shape of the
+       kernel's own SAPR: it is this address space's APR (segment-table root
+       plus the enable bit).  That is the value to put in UAPR to run the
+       process. */
+    u32 map  = kr32(p + P_UMAP);
+    u32 pmap = kcall(0xC008F55Cu, map, 0, 0, 0, 0);      /* vm_map_pmap(map) */
+    printf("  vm_map %08x -> pmap %08x  (map+0x50 = %08x)\n",
+           map, pmap, kr32(map + 0x50));
+    dump_words("vm_map", map, 24);
+    if (pmap >= 0xC0000000u && pmap != 0xFFFFFFFFu) {
+        dump_words("pmap", pmap, 24);
+        printf("  pmap[0]=%08x (ctx+0xa0=%08x)   pmap[1]|1=%08x (ctx+0xa4=%08x)"
+               "  %s\n", kr32(pmap), kr32(ctx + 0xa0), kr32(pmap + 4) | 1u,
+               kr32(ctx + 0xa4),
+               (kr32(pmap) == kr32(ctx + 0xa0)
+                && (kr32(pmap + 4) | 1u) == kr32(ctx + 0xa4)) ? "MATCH" : "differ");
+    }
+    u32 pmap0 = kr32(kr32(cur + P_UMAP) + 0x50);
+    printf("  proc0: vm_map %08x pmap %08x apr %08x    live SAPR=%08x UAPR=%08x\n",
+           kr32(cur + P_UMAP), pmap0, kr32(pmap0 + 4) | 1u,
+           mem_r32(0xFFF7E000u + CMMU_SAPR), mem_r32(0xFFF7E000u + CMMU_UAPR));
+
+    /* --- wire user pages into the new proc's own address space ---
+       vm_allocate(map, &addr, size, flags, node) is c008eb6c: it rejects
+       flags & 0x108 and node >= nnodes (node -1 = any), and flags bit 0 means
+       "anywhere", so bit 0 clear takes the fixed address from *addr.  The boot
+       uses flags 0x90 for the u-area.  The in/out address needs a stable
+       kernel-writable word: proc+0xe0 is zero and untouched, so it serves. */
+    if (pmap < 0xC0000000u || pmap == 0xFFFFFFFFu) return 0;
+    u32 slot = p + 0xe0;   /* a zero, unused proc word: vm_allocate's in/out addr */
+    /* Sanity: procdup already mapped this proc's u-area at 0xBFFFE000, so that
+       VA must resolve through this APR.  If it does not, the APR is wrong and
+       nothing below means anything. */
+    /* pmap_activate (c00a30c0, called from load_context with &ctx+0xa4) does
+       `apr = *p | 0x80000000` and stores it to SAPR *and* UAPR of every CMMU --
+       so kernel and user share one segment table per address space, and the
+       real APR is ctx+0xa4 | bit31 (interleaved mode 2). */
+    /* pmap_map (c00a6b44) writes its descriptors at pmap[0] + (va>>23)*8 --
+       and (va>>23)*8 == (va>>22)*4, so pmap[0] IS an ordinary 88200 segment
+       table, written two 4MB segments at a time.  But pmap[0] is a kernel
+       VIRTUAL address, while the APR (pmap[1]) is physical: check whether they
+       are the same memory, because if not, the hardware never sees these
+       tables and only the emulator's synthetic map is keeping the boot alive. */
+    /* The walker must reach the kernel's tables where they really are before any
+       of this proc's user VAs can resolve.  Set the bias first: the loader below
+       writes through it. */
+    ktab_bias = (kr32(pmap) - KOFF) - kr32(pmap + 4);
+    printf("  kernel table bias = %08x (table VA %08x, kernel PA %08x)\n",
+           ktab_bias, kr32(pmap), kr32(pmap + 4));
+
+    /* --- load a real nX binary into the proc's address space --- */
+    AOut a;
+    static char defprog[1024];
+    const char *path = uprog_path;
+    if (!path) {
+        snprintf(defprog, sizeof defprog, "%s/bin/echo", guest_root);
+        path = defprog;
+    }
+    if (aout_load(path, &a)) { printf("  !! cannot load %s\n", path); return 0; }
+    /* nX tape a.out: an 8192-byte header page in the file, text loading at VA 0
+       (see load_from_aout in proc.c for the two layouts). */
+    int std      = ((a.magic >> 16) & 0xFFu) != 0;
+    u32 txtoff   = std ? 0 : HDR_PAGE, txtaddr = std ? HDR_PAGE : 0;
+    u32 dataddr  = txtaddr + ((a.text + 4095) & ~4095u);
+    u32 datoff   = txtoff + a.text;
+    u32 img_hi   = (dataddr + a.data + a.bss + 0x1FFFu) & ~0x1FFFu;
+    u32 stk_lo   = STACK_TOP - 0x10000u;
+
+    struct { u32 lo, hi; const char *what; } rng[2] = {
+        { txtaddr & ~0x1FFFu, img_hi, "image" },
+        { stk_lo, STACK_TOP,  "stack" },
+    };
+    for (unsigned i = 0; i < 2; i++) {
+        mem_w32(translate(slot, 0), rng[i].lo);
+        u32 e = kcall(0xC008EB6Cu, map, slot, rng[i].hi - rng[i].lo,
+                      0x90, 0xFFFFFFFFu);
+        u32 w = kcall(0xC0092350u, map, rng[i].lo, rng[i].hi, 1, 0);
+        printf("  %s %08x..%08x: vm_allocate errno=%u, vm_map_pageable errno=%u\n",
+               rng[i].what, rng[i].lo, rng[i].hi, e, w);
+        if (e || w) return 0;
+    }
+    /* Copy text/data in through the frames the kernel chose; bss stays zero. */
+    u32 missing = 0;
+    for (u32 va = rng[0].lo; va < rng[0].hi; va += PAGE_SIZE) {
+        u32 pa = 0;
+        if (!kwalk(pmap, va, &pa, 0, 0)) { missing++; continue; }
+        for (u32 i = 0; i < PAGE_SIZE; i++) {
+            u32 o = va + i;
+            u8 b = 0;
+            if (o >= txtaddr && o < txtaddr + a.text)
+                b = a.img[txtoff + (o - txtaddr)];
+            else if (o >= dataddr && o < dataddr + a.data)
+                b = a.img[datoff + (o - dataddr)];
+            mem_w8(pa + i, b);
+        }
+    }
+    printf("  loaded %s: text=%u@%08x data=%u@%08x bss=%u entry=%08x "
+           "(%u pages unmapped)\n", path, a.text, txtaddr, a.data, dataddr,
+           a.bss, a.entry, missing);
+    if (missing) return 0;
+
+    /* Standard BSD startup stack: strings at the top, then
+       { argc, argv[], NULL, envp[], NULL } for crt0 to unpack. */
+    u32 sp = STACK_TOP, sptr[MAX_UARGV + MAX_UENVP + 2];
+    unsigned ns = 0;
+    const char *dfl_av[1] = { "echo" };
+    const char **av = nuargv ? (const char **)uargv : dfl_av;
+    unsigned nav = nuargv ? nuargv : 1;
+    for (unsigned k = 0; k < nav; k++) {
+        u32 l = (u32)strlen(av[k]) + 1;
+        sp -= l;
+        for (u32 i = 0; i < l; i++) uput8(pmap, sp + i, (u8)av[k][i]);
+        sptr[ns++] = sp;
+    }
+    for (unsigned k = 0; k < nuenvp; k++) {
+        u32 l = (u32)strlen(uenvp[k]) + 1;
+        sp -= l;
+        for (u32 i = 0; i < l; i++) uput8(pmap, sp + i, (u8)uenvp[k][i]);
+        sptr[ns++] = sp;
+    }
+    sp = (sp - (1 + nav + 1 + nuenvp + 1) * 4) & ~7u;
+    u32 w = sp;
+    uput32(pmap, w, nav); w += 4;
+    for (unsigned k = 0; k < nav; k++)      { uput32(pmap, w, sptr[k]); w += 4; }
+    uput32(pmap, w, 0); w += 4;
+    for (unsigned k = 0; k < nuenvp; k++)   { uput32(pmap, w, sptr[nav + k]); w += 4; }
+    uput32(pmap, w, 0);
+
+    /* --- make it the running process, the kernel's own way ---
+       load_context(ctx) restores only r15..r31 and rte's to ctx+0x80, so the
+       entry arguments cannot be passed in r2/r3.  Park them in r15/r16 (which
+       ARE restored) and resume at a three-instruction trampoline that moves them
+       into place and branches to _icode(entry, sp, 0) -- the kernel's own
+       enter-user-mode gate (clears PSR bit31, sets SR1/SNIP/SFIP, rte). */
+    u32 tramp = 0xC0F00000u;                  /* kernel VA hole: past text, below data */
+    u32 tpa = translate(tramp, 0);
+    if (mem_r32(tpa) || mem_r32(tpa + 4)) {
+        printf("  !! trampoline page %08x is not free\n", tramp);
+        return 0;
+    }
+    mem_w32(tpa + 0,  0x584F0000u);           /* or r2, r15, 0   ; entry */
+    mem_w32(tpa + 4,  0x58700000u);           /* or r3, r16, 0   ; sp    */
+    mem_w32(tpa + 8,  0x58800000u);           /* or r4, r0,  0   ; flag  */
+    mem_w32(tpa + 12, 0xC0000000u |           /* br _icode              */
+                      (((0xC0016E30u - (tramp + 12)) >> 2) & 0x03FFFFFFu));
+
+    mem_w32(translate(ctx + 0x3c, 0), a.entry);   /* r15 = entry */
+    mem_w32(translate(ctx + 0x40, 0), sp);        /* r16 = user sp */
+    mem_w32(translate(ctx + 0x80, 0), tramp);     /* resume PC */
+    mem_w32(translate(G_CURPROC, 0), p);          /* u.u_procp = the new proc */
+
+    deliver_traps = 1;
+    WR(2, ctx);
+    cpu.pc = 0xC0017498u;                         /* load_context(ctx) */
+    printf("  load_context(%08x): resuming as pid %u, entry %08x, sp %08x\n",
+           ctx, kr32(p + P_PID) >> 16, a.entry, sp);
+    return 1;
 }
 
 /* First real-exec experiment: build a fresh user address space with the kernel's
@@ -254,6 +609,9 @@ int step(void)
     u32 pc = cpu.pc;
     dbg_pc = pc; dbg_count = cpu.count;
     if (vmprobe) vm_probe_tick(pc);
+    if (ctxtrace && pc == 0xC0017498u) ctx_tick();     /* load_context(ctx) */
+    if (stwatch_pc) stwatch_tick(pc);
+    if (regfind_val) regfind_tick(pc);
 
     /* SHA I/O wait: complete synchronously and return from tsleep as if woken.
        sleep_and_unlock releases the caller's lock (3rd arg, r4) on the normal

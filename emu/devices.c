@@ -9,6 +9,7 @@ void memop(u32 sub, u32 D, u32 ea)
        it must return the untranslated virtual address.  Everything else
        translates before touching memory. */
     if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
+    if (wmem_hi || stwatch_active) wmem_tick(sub, D, ea);      /* --wmem: watch a VIRTUAL range */
     ea = translate(ea, 0);
     if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 100000) {
         int st = (sub >= 0x08 && sub <= 0x0B);

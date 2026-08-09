@@ -74,6 +74,28 @@ void boot_build_tables(void)
            CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
 }
 
+/* The kernel builds its page tables through kernel VIRTUAL addresses but names
+   them physically in the APR, and this emulator does not place kernel memory at
+   the physical addresses the kernel believes in -- so a descriptor read at the
+   APR's address finds nothing.  ktab_bias (emulator PA - kernel PA, derived from
+   any pmap as (pmap[0]-KOFF) - pmap[1]) reaches the same table where it really
+   lives.  Zero when unused, so the default boot is untouched.
+
+   Scope matters: this is applied ONLY to user-space VAs.  Kernel data still
+   resolves through the synthetic direct map, which is where its contents
+   actually are -- biasing kernel VAs too silently sends 500+ accesses per
+   syscall to the kernel's *intended* physical pages, which in this emulator are
+   empty.  Kernel-space coherence is the rest of the realmm work. */
+static u32 tab_r32(u32 pa, int biased)
+{
+    u32 v = mem_r32(pa);
+    if (!(v & 1) && biased) {
+        u32 alt = mem_r32((pa & 0x3FFFFFFFu) + ktab_bias);
+        if (alt & 1) return alt;
+    }
+    return v;
+}
+
 /* Two-level MC88200 walk: area pointer -> segment table -> page table. */
 int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
 {
@@ -84,12 +106,14 @@ int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
         segtab = DATA_SEGTAB;
         ileave_redirects++;
     }
-    u32 sdesc = mem_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4);
+    int biased = ktab_bias && vaddr < 0xC0000000u;
+    u32 sdesc = tab_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4, biased);
     if (!(sdesc & 1)) return 0;                       /* segment invalid */
     u32 pgtab = sdesc & 0xFFFFF000u;
-    u32 pdesc = mem_r32(pgtab + ((vaddr >> 12) & 0x3FF) * 4);
+    u32 pdesc = tab_r32(pgtab + ((vaddr >> 12) & 0x3FF) * 4, biased);
     if (!(pdesc & 1)) return 0;                       /* page invalid */
     *phys = (pdesc & 0xFFFFF000u) | (vaddr & 0xFFF);
+    if (biased) kwalk_user++;
     return 1;
 }
 

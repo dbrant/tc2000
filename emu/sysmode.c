@@ -86,6 +86,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
             printf("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
                    (unsigned long long)cpu.count);
+            if (procexp) { if (proc_experiment()) continue; break; }  /* real proc */
             if (vmexp) { vm_experiment(); break; }      /* step-2 VM RPC probe */
             if (utest) { launch_utest(); continue; }   /* drop to user mode */
             break;
@@ -292,6 +293,9 @@ int run_sys(const char *path, u64 limit, u32 sig)
             putchar('\n');
         }
     if (vmprobe) vm_probe_report();
+    if (ctxtrace) ctx_report();
+    if (ktab_bias) printf("user-space walks through the kernel's real tables: %llu\n",
+                          (unsigned long long)kwalk_user);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     if (!quiet_uproc) {
         printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);
