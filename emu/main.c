@@ -103,6 +103,23 @@ int main(int argc, char **argv)
         if (!cfg_nodes) cfg_nodes = 1;
         hwfault = !no_hwfault;
         peru    = !no_peru;
+        /* --diskmount is a shortcut for the SYNTHETIC process model only: it
+           lives in uproc_syscall's execve (proc.c case 59), which --procexec
+           switches off entirely.  Silently ignoring it just yields
+           "<path>: not found", so say so and point at the real route -- under
+           --procexec the guest can genuinely mount the disk and the kernel then
+           execs from it with no help from us. */
+        if (disk_mount) {
+            fprintf(stderr,
+                "nx88: --diskmount=%s has NO EFFECT with --procexec (it only\n"
+                "      works in the synthetic --uprog model).  Let the guest\n"
+                "      mount the disk for real instead, then exec the full path:\n"
+                "        nx88 sys <vmunix> --procexec --scsi --uprog=/bin/sh ...\n"
+                "        # /etc/mount /dev/sd0b %s\n"
+                "        # %s/bin/<prog>\n",
+                disk_mount, disk_mount, disk_mount);
+            disk_mount = 0;
+        }
     }
     if (nwords) path = words[0];
     if (!path) {

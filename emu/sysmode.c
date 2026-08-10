@@ -517,6 +517,13 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     fd_watch_pipe = (RD(9) == 41 && RD(2) < 64) ? fd_pipe[RD(2)] : 0;
                     if (RD(9) == 41 && RD(2) < 64 && fd_disk[RD(2)]) fd_watch_disk = 1;
                 }
+                if (verbose_sys && trap_vector == 128
+                    && !(cpu.cr[1] & 0x80000000u) && RD(9) == 59) {
+                    char p[128];
+                    uread_str(RD(2), p, sizeof p);
+                    printf("[exec] pid %d \"%s\" @%llu\n", real_pid(), p,
+                           (unsigned long long)cpu.count);
+                }
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
                     && RD(2) < 64)
                     fd_kernel[RD(2)] = fd_console[RD(2)] = fd_pipe[RD(2)] =
