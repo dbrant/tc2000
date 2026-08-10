@@ -94,8 +94,6 @@ int  ufault_code;
 int  ufault_write;     /* the faulting access was a store (or xmem) */
 int  xlat_write;       /* memop: the access being translated is a store */
 u64  cow_faults;       /* copy-on-write faults raised (--hwfault) */
-u64  cow_copies;       /* COW breaks whose page contents we carried over */
-u32  cow_pend_va, cow_pend_pa;  /* the break in flight */
 u32  ufault_width;     /* its width in bytes (1/2/4/8) */
 u64  ufaults;
 u64  kdis_n, kfall_n;  /* kernel-VA table/linear disagreements; table misses */

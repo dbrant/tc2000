@@ -68,6 +68,8 @@ int main(int argc, char **argv)
             stwatch_pc = (u32)strtoul(argv[i] + 10, 0, 0);
         else if (!strncmp(argv[i], "--regfind=", 10))
             regfind_val = (u32)strtoul(argv[i] + 10, 0, 0);
+        else if (!strncmp(argv[i], "--traceat=", 10)) wtrace_at = strtoull(argv[i]+10,0,0);
+        else if (!strncmp(argv[i], "--wtrace=", 9)) wtrace_n = strtoull(argv[i]+9,0,0);
         else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
         else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);
@@ -138,6 +140,11 @@ int main(int argc, char **argv)
                 "               load binaries from the SCSI disk's own FFS\n"
                 "  --console-port=N  serve the interactive console on 127.0.0.1:N\n"
                 "               (VT100/telnet); the kernel log stays on stdout\n"
+                "  --watch=PC   dump registers every time PC executes\n"
+                "  --wtrace=N   after --watch fires, print the next N instruction\n"
+                "               addresses -- answers \"which way did THIS call\n"
+                "               branch\", which the aggregate --pchist cannot\n"
+                "  --traceat=C  arm --wtrace at instruction count C instead\n"
                 "  --procexec --uprog=PATH  run PATH as a REAL nX process: the\n"
                 "               kernel's own execve, fork, copy-on-write and\n"
                 "               scheduler.  Implies --dataphys, --nodes=1 and\n"

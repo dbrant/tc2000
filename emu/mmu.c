@@ -217,27 +217,18 @@ void tlb_flush(void)
    the value the PARENT had since pushed there -- so it returned to the wrong
    place and ran the parent's code path instead of exec'ing the command.
 
-   Raise a write fault instead and let the kernel's own vm_fault break the COW.
+   Raise a write fault instead and let the kernel's own vm_fault break the COW,
+   which it does completely -- it finds the resident page, allocates a fresh one
+   and calls pmap_copy_page to carry the contents over.  (The emulator used to
+   have to redo that copy itself, because pmap_copy_page's scratch window landed
+   in unbacked space; see scratch_base() below.  It does not any more.)
+
    Only under --hwfault: that is the one path that can resolve it (the fallback
    resolver calls vm_map_pageable, which reports success on a COW entry without
    materialising anything).  Returns 1 if a fault was recorded. */
-static int cow_fault(u32 va, u32 pa)
+static int cow_fault(u32 va)
 {
     if (!hwfault || !procexp || !xlat_write || ufault_pending) return 0;
-    /* ★ Remember the page we are breaking away from.  The kernel resolves this
-       fault by giving the writer a fresh page -- and never copies the old one
-       into it, so the writer's memory comes back ZERO.  Verified on both of a
-       forked shell's regions: its stack word at bfffde9c goes 000078dc -> 0
-       across the break, and its heap (the parsed command line) goes the same
-       way, which is why sh's child found an empty command list and exited.
-       Both parent and child lose their data; the source page is still intact
-       and still correctly registered in the old vm_object, hashed and all --
-       the kernel simply never issues the copy.  Do it here: on the next
-       translation of this page, if it now resolves somewhere else, the break
-       happened and we copy the bytes across.  8K, the kernel's VM granularity
-       everywhere. */
-    cow_pend_va = va & ~0x1FFFu;
-    cow_pend_pa = pa & ~0x1FFFu;
     ufault_pending = 1;
     ufault_va = va;
     ufault_code = 0;
@@ -248,22 +239,26 @@ static int cow_fault(u32 va, u32 pa)
     return 1;
 }
 
-/* Finish the copy-on-write break recorded by cow_fault(): the faulting page
-   now resolves to a different physical page, so carry the old contents over. */
-static void cow_settle(u32 va, u32 pa)
+/* ★ The kernel copies a physical page by mapping it into a fixed SCRATCH VA
+   window and copying through it: pmap_copy_page (c00a7368) writes the two page
+   descriptors at [0xC0014050] and [..]+4, then loads and stores through the VA
+   pair based at [0xC0014058] -- 0xF8000000/0xF8001000 on this kernel.  That
+   window sits above 0xE0000000, which this model otherwise answers as identity
+   device space, so the loads read unbacked space and the stores went nowhere:
+   EVERY copy_page produced a page of zeros.  That one fact is why a forked
+   child's copy-on-write pages came back empty (sh's child ran with a blank
+   stack and heap) and why the fork's u-area copy never arrived either.
+
+   The base is a kernel global, so read it rather than hardcoding it; it is set
+   once during pmap init and is 0 before that. */
+static u32 scratch_base(void)
 {
-    if (!cow_pend_va || (va & ~0x1FFFu) != cow_pend_va) return;
-    u32 dst = pa & ~0x1FFFu;
-    if (dst != cow_pend_pa) {
-        for (u32 o = 0; o < 0x2000u; o += 4)
-            mem_w32(dst + o, mem_r32(cow_pend_pa + o));
-        cow_copies++;
-        if (verbose_sys && cow_copies < 30)
-            printf("[cow] va %08x broke %08x -> %08x, copied 8K  pc=%08x @%llu\n",
-                   cow_pend_va, cow_pend_pa, dst, cpu.pc,
-                   (unsigned long long)cpu.count);
+    static u32 cached;
+    if (!cached && kdata_off && translate_on) {
+        u32 v = mem_r32(translate(0xC0014058u, 0));
+        if (v >= 0xE0000000u) cached = v & ~0xFFFu;
     }
-    cow_pend_va = cow_pend_pa = 0;
+    return cached;
 }
 
 u32 translate(u32 va, int code)
@@ -295,7 +290,37 @@ u32 translate(u32 va, int code)
             if (!(apr & 1) || !mmu_walk(apr, va, &pa, 0)) return va;
             return pa;
         }
-        if (va >= 0xE0000000u) return va;
+        /* ★ >=0xE0000000 is device space -- EXCEPT that the kernel also puts its
+           PHYSICAL-ACCESS SCRATCH WINDOW up there.  pmap_copy_page (c00a7368)
+           copies a page by writing the two descriptors at [0xC0014050] and
+           [..]+4, then loading and storing through the pair of VAs at
+           [0xC0014058] -- 0xF8000000 and 0xF8001000 on this kernel.  Answering
+           those with identity sent the reads into unbacked space and dropped
+           the writes on the floor, so EVERY copy_page produced a page of zeros.
+           That single fact is why a forked child's copy-on-write pages came back
+           empty (sh's child ran with a blank stack and heap) and why the fork's
+           u-area copy did not arrive either.  Consult the kernel's own table
+           first; identity stays the answer for the VAs it does not map, which is
+           all the real device windows. */
+        if (va >= 0xE0000000u) {
+            /* Everything else up here is a real device window (0xE07xxxxx DUART
+               / interleaver / node control -- where our own synthetic tables
+               also live -- 0xFF0xxxxx MMU tables, 0xFFF7xxxx CMMU registers),
+               and the kernel's table holds mappings for some of them that this
+               model deliberately does not follow.  Honour it ONLY for the
+               scratch pair. */
+            u32 sb = scratch_base();
+            if (!sb || va < sb || va >= sb + 0x2000u) return va;
+            u32 vpn = va >> 12, idx = vpn & (TLB_SIZE - 1);
+            if (tlb[code][idx].tag == (vpn | 0x80000000u))
+                return tlb[code][idx].pa | (va & 0xFFF);
+            u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
+            u32 pa;
+            if (!(apr & 1) || !mmu_walk(apr, va, &pa, 0)) return va;
+            tlb[code][idx].tag = vpn | 0x80000000u;
+            tlb[code][idx].pa  = pa & 0xFFFFF000u;
+            return pa;
+        }
         u32 dp = devmap_lookup(va & ~0xFFFu);
         if (dp) return dp | (va & 0xFFF);
         /* --dataphys: the data segment is loaded at the physical address nX
@@ -353,8 +378,7 @@ u32 translate(u32 va, int code)
         /* bit 0 of the cached PA carries the page's write-protect bit; the
            real PA is page-aligned so it is free.  See cow_fault(). */
         u32 tpa = (tlb[code][idx].pa & 0xFFFFF000u) | (va & 0xFFF);
-        if ((tlb[code][idx].pa & 1u) && cow_fault(va, tpa)) return 0;
-        if (cow_pend_va) cow_settle(va, tpa);
+        if ((tlb[code][idx].pa & 1u) && cow_fault(va)) return 0;
         return tpa;
     }
 
@@ -376,14 +400,6 @@ u32 translate(u32 va, int code)
            hook delivers a real vector 2 (code) / 3 (data) access fault to the
            kernel instead -- see deliver_fault and the note in run_sys. */
         if (procexp && !ufault_pending) {
-            /* A not-present fault on a needs_copy entry is the OTHER half of a
-               copy-on-write break: the fork unmapped these pages rather than
-               write-protecting them, so there is no old PTE to copy from --
-               ask the kernel's own vm_object for the page instead. */
-            if (hwfault && xlat_write && !code) {
-                u32 src = cow_find_source(va);
-                if (src) { cow_pend_va = va & ~0x1FFFu; cow_pend_pa = src; }
-            }
             ufault_pending = 1;
             ufault_va = va;
             ufault_code = code;
@@ -402,7 +418,6 @@ u32 translate(u32 va, int code)
     }
     tlb[code][idx].tag = vpn | 0x80000000u;
     tlb[code][idx].pa  = (pa & 0xFFFFF000u) | ((pd & PTE_WP) ? 1u : 0u);
-    if ((pd & PTE_WP) && cow_fault(va, pa)) return 0;
-    if (cow_pend_va) cow_settle(va, pa);
+    if ((pd & PTE_WP) && cow_fault(va)) return 0;
     return pa;
 }

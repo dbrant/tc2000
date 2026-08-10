@@ -341,8 +341,21 @@ int run_sys(const char *path, u64 limit, u32 sig)
             }
             if (fd_watch_pair && RD(3) < 64 && RD(2) < 64) {
                 fd_kernel[RD(3)] = 1;                  /* pipe(2): two fds */
-                int pi = pipe_alloc();                 /* ...one buffer     */
-                if (pi >= 0) fd_pipe[RD(2)] = fd_pipe[RD(3)] = (u8)(pi + 1);
+                /* ★ Emulator-buffered pipes are a SYNTHETIC-model crutch: those
+                   processes cannot sleep, so a pipe needs an unbounded buffer
+                   where an empty read means EOF, and the child has to be run
+                   first.  Under --procexec the kernel has real processes and
+                   real, BLOCKING pipes -- intercepting them instead breaks
+                   command substitution, because the kernel is free to schedule
+                   the reader first and our buffer then reports EOF.  Symptom:
+                   `x=`ls | grep bin`` came back empty (a plain `ls | grep bin`
+                   was fine -- there the shell never reads the pipe itself), and
+                   /etc/nxinstall then tried to exec "/" and died.  So leave
+                   pipes to the kernel here. */
+                if (!procexec) {
+                    int pi = pipe_alloc();             /* ...one buffer     */
+                    if (pi >= 0) fd_pipe[RD(2)] = fd_pipe[RD(3)] = (u8)(pi + 1);
+                }
             }
             fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0; fd_watch_disk = 0;
         }

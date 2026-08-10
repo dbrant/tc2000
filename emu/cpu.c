@@ -108,6 +108,7 @@ void ctx_report(void)
    makes" (--stwatch=PC), which answers "where does this routine actually write?"
    without having to guess the address first. */
 static u64 wmem_n;
+u64 wtrace_n, wtrace_left, wtrace_at;
 int stwatch_active;
 static u32 stwatch_ret;
 static int stwatch_done;
@@ -948,32 +949,6 @@ int step(void)
         return 0;
     }
 
-    /* ★ procdup (c005e7a4) hands the child a u-area that is supposed to be a
-       COPY of the parent's.  It builds it with vm_map_u_area_create
-       (c0093e54 -- vm_allocate + vm_protect(rw) + vm_fault(WRITE) at the fixed
-       VA 0xBFFFE000), relying on that write fault to break copy-on-write
-       against the parent's u-area object and materialise a private copy.  Our
-       VM completes the allocation but not the COW, so the page comes back
-       ZERO, and the whole fork falls apart:
-
-         - The child resumes at the parent's saved PC (c005e870) on the
-           parent's saved kernel SP, and reads its return address from
-           [r31+0x11c] -- zero, so it jumps to 0.
-         - The fork's own parent/child discriminator is a word on that stack:
-           procdup sets [r31+0x114] = 1 on entry, the child's u-area is
-           snapshotted while it still reads 1, and the parent then clears it to
-           0 before save_context.  A zero page makes both sides "parent".
-
-       Do the copy the COW would have done, at the point the kernel asks for
-       the page (r1 = its physical address on return from c0093e54).  8K: the
-       window aliases the same two physical pages twice.  Only meaningful once
-       the u-area window is resolved through the kernel's tables (--dataphys),
-       which is what makes u-areas per-process in the first place. */
-    if (peru && sysmode && kdata_off && pc == 0xC005E81Cu) {
-        u32 src = translate(UAREA_LO, 0), dst = RD(1);
-        for (u32 o = 0; o < 0x2000u; o += 4) mem_w32(dst + o, mem_r32(src + o));
-    }
-
     /* SHA I/O wait: complete synchronously and return from tsleep as if woken.
        sleep_and_unlock releases the caller's lock (3rd arg, r4) on the normal
        wakeup path; release it here too, but only when r4 is a kernel-space lock
@@ -1259,12 +1234,23 @@ int step(void)
                RD(9), (unsigned long long)cpu.count);
     }
 
+    /* --wtrace=N: once --watch fires, print the next N instruction addresses.
+       The aggregate view (--pchist) cannot answer "which way did THIS call
+       branch"; a straight-line trace from a known trigger can. */
+    if (wtrace_at && cpu.count >= wtrace_at) { wtrace_left = wtrace_n; wtrace_at = 0; }
+    if (wtrace_left) {
+        printf("[wt] %08x\n", pc);
+        wtrace_left--;
+    }
     if (watch_pc && pc == watch_pc) {
+        if (wtrace_n && !wtrace_left) wtrace_left = wtrace_n;
         /* r9 is worth its place: it is the syscall number in nX's ABI, so
            --watch on the dispatcher (c00ab278) names the call. */
         printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
-               "r9=%08x | r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
+               "r9=%08x | r17=%08x r18=%08x r19=%08x r21=%08x r22=%08x "
+               "r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
                pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6), RD(9),
+               RD(17), RD(18), RD(19), RD(21), RD(22),
                RD(23), RD(24), RD(25), RD(26), RD(27),
                (unsigned long long)cpu.count);
     }
@@ -1420,21 +1406,16 @@ int step(void)
                via rte, and interrupt entry invalidates SXIP so the real resume
                point is SNIP.  Process launch / fault return set SNIP valid. */
             cpu.cr[1] = cpu.cr[2];       /* restore PSR from EPSR */
-            /* ★ Returning to USER mode: drop the cached translations.  Our TLB
-               has no address-space tag, and the kernel changes a process's
-               mappings while it is in the kernel -- exec is the sharp case: it
-               replaces the image but reuses the pmap, so no APR write flushes
-               us, and the CMMU invalidations it does issue we do not model at
-               single-page granularity.  A forked shell's child then re-entered
-               user mode still fetching the OLD image through stale entries: it
-               ran /bin/sh's crt0 after exec'ing /bin/echo, branched to sh's
-               main, and died on a null store ("Memory fault - core dumped").
-               Flush on every exception return, the same conservative policy
-               cmmu_command already applies to invalidate commands: correctness
-               first, and the TLB refills immediately.  Returning to user alone
-               is NOT enough -- the kernel reaches user memory itself through
-               copyin/copyout while still in supervisor mode. */
-            tlb_flush();
+            /* No TLB flush here.  There was one -- a blanket flush on every
+               exception return -- because our TLB has no address-space tag and
+               a forked shell's child re-entered user mode still fetching the
+               OLD image through stale entries after exec.  It is redundant now:
+               the two hardware events that invalidate a translation are both
+               modelled, an APR write (context switch, devices.c) and any CMMU
+               command that is not a probe (mmu.c), and both flush.  Verified by
+               removing it and re-running the whole regression set: every path,
+               including the forked shell, executes the identical instruction
+               count. */
             u32 r = (cpu.cr[4] & 2u) ? cpu.cr[4]
                   : (cpu.cr[5] & 2u) ? cpu.cr[5]
                                      : cpu.cr[6];
