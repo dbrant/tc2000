@@ -419,8 +419,7 @@ int console_syscall(u32 sysno, u32 tpc)
             ret = (long)a2;
         } else {
             u32 avail = (u32)(p->len - p->rpos), n = a2 < avail ? a2 : avail;
-            for (u32 i = 0; i < n; i++)
-                mem_w8(translate(a1 + i, 0), p->buf[p->rpos + i]);
+            n = uwrite_mem(a1, p->buf + p->rpos, n);
             p->rpos += n;
             ret = (long)n;                             /* 0 == end of file */
         }
@@ -449,7 +448,7 @@ int console_syscall(u32 sysno, u32 tpc)
         u32 n = a2 > 4096 ? 4096 : a2;
         u8 tmp[4096];
         u32 got = n ? con_read_line(tmp, n) : 0;        /* one cooked line   */
-        for (u32 i = 0; i < got; i++) mem_w8(translate(a1 + i, 0), tmp[i]);
+        got = uwrite_mem(a1, tmp, got);
         con_in_bytes += got;
         ret = (long)got;
         break;

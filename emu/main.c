@@ -55,6 +55,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--peru"))       peru = 1;
         else if (!strcmp(argv[i], "--no-hwfault")) no_hwfault = 1;
         else if (!strcmp(argv[i], "--no-peru"))    no_peru = 1;
+        else if (!strcmp(argv[i], "--init"))       run_init = 1;
         else if (!strcmp(argv[i], "--procexec"))   { procexp = 1; procexec = 1; }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
@@ -127,6 +128,11 @@ int main(int argc, char **argv)
                 "               per-process u-areas -- a matched pair; neither\n"
                 "               alone is enough).  --no-hwfault / --no-peru opt\n"
                 "               back out for A/B comparison.\n"
+                "  --init       also let init (pid 1) run.  Off by default: it\n"
+                "               is runnable from boot, and once the scheduler\n"
+                "               works it forks a child that READS fd 0 -- so it\n"
+                "               competes with --uprog for the console and eats\n"
+                "               the script's input.\n"
                 "  sys mode defaults to the real-memory model with EEPROM signature\n"
                 "  'A'; pass --identity for the superseded identity path.\n");
         return 2;

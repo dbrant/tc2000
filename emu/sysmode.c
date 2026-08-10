@@ -505,6 +505,9 @@ int run_sys(const char *path, u64 limit, u32 sig)
                         char p[64];
                         uread_str(RD(2), p, sizeof p);
                         if (strstr(p, "sd0")) fd_watch_disk = 1;
+                        if (verbose_sys)
+                            printf("[open] pid %d \"%s\" @%llu\n", real_pid(), p,
+                                   (unsigned long long)cpu.count);
                     }
                     /* dup: whatever the new descriptor turns out to be, it is
                        the host's terminal exactly when the source was.  The

@@ -673,7 +673,7 @@ int proc_experiment(void)
        actually asked to run.  This harness exists to run ONE program under the
        kernel, so leave only it and proc0 -- which we re-queue below so there is
        something to come back to when it exits. */
-    { u32 base = kr32(G_PROCBASE), np = kr32(G_NPROC);
+    { u32 base = kr32(G_PROCBASE), np = run_init ? 0 : kr32(G_NPROC);
       /* ...but never the per-CPU IDLE process: swtch panics
          "unix_switch failed to find any procs / Should have found the idle
          process (at least)" if the queue empties.  Idle table 0xC1015D18[cpu]. */
