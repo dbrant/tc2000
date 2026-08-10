@@ -226,7 +226,7 @@ void tlb_flush(void)
    Returns 1 if a fault was recorded. */
 static int cow_fault(u32 va)
 {
-    if (!hwfault || !procexp || !xlat_write || ufault_pending) return 0;
+    if (!procexp || !xlat_write || ufault_pending) return 0;
     ufault_pending = 1;
     ufault_va = va;
     ufault_code = 0;
@@ -282,7 +282,7 @@ u32 translate(u32 va, int code)
            own tables are readable; a walk miss (early boot, before any context
            exists) falls back to identity, so nothing that worked before this
            moves. */
-        if (peru && kdata_off && va >= UAREA_LO && va < UAREA_HI) {
+        if (procexp && kdata_off && va >= UAREA_LO && va < UAREA_HI) {
             u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
             u32 pa;
             if (!(apr & 1) || !mmu_walk(apr, va, &pa, 0)) return va;

@@ -101,23 +101,24 @@ int main(int argc, char **argv)
        execve do it), so do not override that one. */
     if ((uprog_path || interactive) && !procexp) { procexp = 1; procexec = 1; }
 
-    /* Real MC88100 access-fault delivery and per-process u-areas are now
-       UNCONDITIONAL for both process paths.  They used to be --hwfault/--peru
-       with --no-hwfault/--no-peru to opt back out, for A/B comparison while
-       they were new.  That question is settled: neither alone can run a forked
-       shell (without peru curproc still names the parent after a fork and the
-       first sleep panics; without hwfault the fallback resolver calls
-       vm_map_pageable, which reports success on a copy-on-write entry without
-       materialising anything).  Turning them on for the hand-load path costs
-       nothing -- measured instruction-identical, because that path pre-loads
-       its image and so takes no user faults at all.
+    /* ★ Running a real kernel process (procexp) ALWAYS means real MC88100
+       access-fault delivery and per-process u-areas.  Those were once
+       independently switchable -- --hwfault/--peru with --no-hwfault/--no-peru
+       to opt back out -- so the code carried `hwfault` and `peru` booleans of
+       its own.  They ended up identically equal to procexp and are gone; the
+       branches that used to test them test procexp directly.
 
-       Removing the opt-outs is what let the two remaining emulator stand-ins go
-       with them: the hand-dispatch scavenger (the emulator picking a runnable
-       proc and load_context'ing it, standing in for the 63 CPUs we do not
-       model) and the fallback fault resolver.  Both were reachable only with
-       peru/hwfault off. */
-    if (procexp) { hwfault = 1; peru = 1; }
+       The question they existed to answer is settled and worth not re-opening:
+       neither is optional.  Without per-process u-areas, curproc still names
+       the parent after a fork and the first sleep panics; without real fault
+       delivery the resolver has to call vm_map_pageable, which reports success
+       on a copy-on-write entry without materialising anything.  Measured with
+       the opt-outs still in place: --no-hwfault produced no output at all,
+       --no-peru panicked from c0054c1c, and both off stopped in the fork stub.
+
+       Turning them on for the hand-load path (--handload, procexp without
+       procexec) is free -- measured instruction-identical, because that path
+       pre-loads its image and so takes no user faults. */
 
     /* --uprog/--shell (i.e. procexec) run the kernel's own exec, which needs
        kernel memory to be coherent -- so it implies --dataphys.  It also

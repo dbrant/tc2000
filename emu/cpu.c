@@ -258,7 +258,6 @@ u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
    back-pointer doubles as the "am I queued" flag. */
 void runq_remove(u32 p)
 {
-    if (!peru) return;
     if (!p || !mem_r32(translate(p + 0x80u, 0))) return;   /* not on a queue */
     kcall(0xC0018514u, p, 0, 0, 0, 0);
     /* rem_runq unlinks through _check_rq (c00185dc), a plain remque that fixes
@@ -278,7 +277,7 @@ void runq_remove(u32 p)
    is not already on a queue. */
 void runq_add(u32 p)
 {
-    if (!peru || !p) return;
+    if (!p) return;
     if (mem_r32(translate(p + 0x80u, 0))) return;            /* already queued */
     if (mem_r32(translate(p + 0x40u, 0)) != 3u) return;      /* not SRUN */
     kcall(0xC00559C8u, p, 0, 0, 0, 0);
@@ -290,7 +289,7 @@ void runq_add(u32 p)
 int real_pid(void)
 {
     if (procexp) {
-        u32 cp = mem_r32(translate(peru ? G_CURPROC_G : G_CURPROC, 0));
+        u32 cp = mem_r32(translate(G_CURPROC_G, 0));
         if (cp) return (int)(mem_r32(translate(cp + 0x4Cu, 0)) >> 16);
         return 0;
     }
@@ -302,7 +301,7 @@ int real_pid(void)
 int real_ppid(void)
 {
     if (!procexp) return 0;
-    u32 cp = mem_r32(translate(peru ? G_CURPROC_G : G_CURPROC, 0));
+    u32 cp = mem_r32(translate(G_CURPROC_G, 0));
     if (!cp) return 0;
     u32 pp = mem_r32(translate(cp + 0x18u, 0));
     return pp ? (int)(mem_r32(translate(pp + 0x4Cu, 0)) >> 16) : 0;
@@ -310,7 +309,6 @@ int real_ppid(void)
 
 void set_curproc(u32 p, u32 ctx)
 {
-    if (!peru) { mem_w32(translate(G_CURPROC, 0), p); return; }
     mem_w32(translate(G_CURPROC_G, 0), p);
     u32 upage = kdata_off ? mem_r32(translate(ctx + 0x98u, 0)) : 0;
     if (upage) mem_w32(upage + (G_CURPROC & 0xFFFu), p);
@@ -959,7 +957,7 @@ int step(void)
        the argv string before the re-execution put the right one back.  It
        would also turn a faulting xmem into an exchange performed twice.
        Return 0 in r2; the caller ignores the value. */
-    if (hwfault && sysmode && pc == 0xC00AAA44u) {
+    if (procexp && sysmode && pc == 0xC00AAA44u) {
         cpu.pc = RD(1);
         WR(2, 0);
         return 0;

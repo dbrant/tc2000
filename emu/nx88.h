@@ -364,8 +364,6 @@ void proc_table_dump(void);
 void fd_switch(int pid, int ppid);
 int  real_ppid(void);
 void runq_add(u32 p);
-extern int hwfault;
-extern int peru;
 extern int run_init;
 void sha_complete(void);
 void sha_sdcomplete(u32 cmd);

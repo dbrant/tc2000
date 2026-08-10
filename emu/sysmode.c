@@ -169,7 +169,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                still counts, or we would declare victory mid-script.  Bail out
                if two yields in a row achieve nothing -- that is a real
                deadlock, not a stop condition. */
-            if (peru && alive) {
+            if (alive) {
                 static u64 last_count; static int idle_spins;
                 idle_spins = (cpu.count - last_count < 2000ull) ? idle_spins + 1 : 0;
                 last_count = cpu.count;

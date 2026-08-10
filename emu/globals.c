@@ -85,8 +85,6 @@ u64  wmem_max = 400;
 u64  kwalk_user;       /* user-space walks resolved through the kernel's real tables */
 int  dataphys;         /* --dataphys: load kernel data at the PA nX expects */
 u32  kdata_va, kdata_off;  /* start VA and VA-PA offset of that region */
-int  hwfault;          /* real MC88100 access faults (always on under procexp) */
-int  peru;             /* per-process u-areas (always on under procexp) */
 int  run_init;         /* --init: leave init (pid 1) on the run queue */
 int  ufault_pending;   /* a real process faulted; run_sys pages it in and retries */
 u32  ufault_va, ufault_pc;
