@@ -216,8 +216,55 @@ u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
 #define G_NNODES    0xC1014D40u
 #define G_NEXTPID   0xC1015A68u
 #define G_PROCINUSE 0xC1006B20u
-#define G_CURPROC   0xFBFFE0F0u     /* u.u_procp */
+#define G_CURPROC   0xFBFFE0F0u     /* u.u_procp, in the per-process u-area */
+#define G_CURPROC_G 0xC0014044u     /* the GLOBAL curproc the scheduler keeps */
 #define F_NEWPROC   0xC004E3B0u
+
+/* Point the kernel at `p` as the running process, the way its own scheduler
+   does at c0056290 immediately before load_context.  There are TWO of these
+   and both matter: u.u_procp in the u-area, and the global at 0xC0014044 --
+   which is the one the fault path reads (exreturn takes the vm_map to fault
+   against from [0xC0014044]+0xd4, so leaving it stale makes every user fault
+   resolve into the previous process's address space and repeat forever).
+
+   With per-process u-areas, u.u_procp has to be written into the INCOMING
+   process's page: the fixed window still shows the outgoing one until
+   load_context reprograms its descriptors from ctx+0x98.  Without --dataphys
+   the window is one shared page and the plain write is exactly right. */
+/* Take `p` off its run queue -- what the scheduler's own dispatch does before
+   it runs a process, and which nothing does for the ones we dispatch by hand
+   with load_context.  newproc setrq's (c00559c8) every process it creates, so
+   ours arrives runnable AND still linked; the first sleep it reaches then
+   panics, because sleep_and_unlock's gate (c0054be0) is 4.3BSD's
+   `chan == 0 || p_stat != SRUN || p_rlink` and p_rlink is still set.
+
+   Use the kernel's own rem_runq (c0018514) rather than unlinking by hand: a
+   run queue is 32 per-priority lists plus a count at +0x11c, a lowest-used
+   priority hint at +0x118 and a lock at +0x100, and the proc carries a
+   back-pointer to its queue at p+0x80 which set_runq (c00183f4) panics on if
+   it is still set ("set_runq: proc 0x%x already on run queue 0x%x").  That
+   back-pointer doubles as the "am I queued" flag. */
+void runq_remove(u32 p)
+{
+    if (!peru) return;
+    if (!p || !mem_r32(translate(p + 0x80u, 0))) return;   /* not on a queue */
+    kcall(0xC0018514u, p, 0, 0, 0, 0);
+    /* rem_runq unlinks through _check_rq (c00185dc), a plain remque that fixes
+       the NEIGHBOURS and leaves the element's own p_link/p_rlink dangling.
+       sleep_and_unlock reads p_rlink directly, so clear them the way procdup
+       does when it builds a proc (c005e800/c005e804). */
+    mem_w32(translate(p, 0), 0);
+    mem_w32(translate(p + 4u, 0), 0);
+}
+
+void set_curproc(u32 p, u32 ctx)
+{
+    if (!peru) { mem_w32(translate(G_CURPROC, 0), p); return; }
+    mem_w32(translate(G_CURPROC_G, 0), p);
+    u32 upage = kdata_off ? mem_r32(translate(ctx + 0x98u, 0)) : 0;
+    if (upage) mem_w32(upage + (G_CURPROC & 0xFFFu), p);
+    else       mem_w32(translate(G_CURPROC, 0), p);
+}
 
 static void dump_words(const char *what, u32 base, u32 n)
 {
@@ -548,7 +595,8 @@ int proc_experiment(void)
     mem_w32(translate(ctx + 0x3c, 0), a.entry);   /* r15 = entry */
     mem_w32(translate(ctx + 0x40, 0), sp);        /* r16 = user sp */
     mem_w32(translate(ctx + 0x80, 0), tramp);     /* resume PC */
-    mem_w32(translate(G_CURPROC, 0), p);          /* u.u_procp = the new proc */
+    runq_remove(p);                               /* the scheduler's dequeue */
+    set_curproc(p, ctx);                          /* u.u_procp + global curproc */
 
     deliver_traps = 1;
     WR(2, ctx);
@@ -810,6 +858,32 @@ int step(void)
         cpu.pc = RD(1);
         WR(2, 0);
         return 0;
+    }
+
+    /* ★ procdup (c005e7a4) hands the child a u-area that is supposed to be a
+       COPY of the parent's.  It builds it with vm_map_u_area_create
+       (c0093e54 -- vm_allocate + vm_protect(rw) + vm_fault(WRITE) at the fixed
+       VA 0xBFFFE000), relying on that write fault to break copy-on-write
+       against the parent's u-area object and materialise a private copy.  Our
+       VM completes the allocation but not the COW, so the page comes back
+       ZERO, and the whole fork falls apart:
+
+         - The child resumes at the parent's saved PC (c005e870) on the
+           parent's saved kernel SP, and reads its return address from
+           [r31+0x11c] -- zero, so it jumps to 0.
+         - The fork's own parent/child discriminator is a word on that stack:
+           procdup sets [r31+0x114] = 1 on entry, the child's u-area is
+           snapshotted while it still reads 1, and the parent then clears it to
+           0 before save_context.  A zero page makes both sides "parent".
+
+       Do the copy the COW would have done, at the point the kernel asks for
+       the page (r1 = its physical address on return from c0093e54).  8K: the
+       window aliases the same two physical pages twice.  Only meaningful once
+       the u-area window is resolved through the kernel's tables (--dataphys),
+       which is what makes u-areas per-process in the first place. */
+    if (peru && sysmode && kdata_off && pc == 0xC005E81Cu) {
+        u32 src = translate(UAREA_LO, 0), dst = RD(1);
+        for (u32 o = 0; o < 0x2000u; o += 4) mem_w32(dst + o, mem_r32(src + o));
     }
 
     /* SHA I/O wait: complete synchronously and return from tsleep as if woken.

@@ -70,6 +70,12 @@ typedef uint64_t u64;
 #define DATA_SEGTAB 0x803F0000u
 #define PTPOOL      0xDF000000u          /* above the kernel's memory */
 #define KOFF 0xC0000000u                 /* kernel VA -> PA offset */
+/* The per-process u-area + kernel-stack window.  `_u` is 0xFBFFE000 (0x2000
+   bytes); load_context (c0017498) writes FOUR page-table descriptors for it
+   from ctx+0x98, mapping the same two physical pages twice, so the window it
+   really covers is 16K starting at 0xFBFFC000. */
+#define UAREA_LO 0xFBFFC000u
+#define UAREA_HI 0xFC000000u
 #define TCS_MBOX 0xFE001800u
 #define PMAP_MAP_FN 0xC00A6B44u
 /* --procexp scratch: a free kernel VA between the end of text (0xC00D2000) and
@@ -372,7 +378,10 @@ void dev_write32(u32 a, u32 v);
 void deliver_exception(u32 vector);
 void deliver_trap(u32 vector, u32 tpc);
 void deliver_fault(u32 vector, u32 pc, u32 va, int code, int write, u32 width);
+void set_curproc(u32 p, u32 ctx);
+void runq_remove(u32 p);
 extern int hwfault;
+extern int peru;
 void sha_complete(void);
 void sha_sdcomplete(u32 cmd);
 void sd_ensure_label(void);

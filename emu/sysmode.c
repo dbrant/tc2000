@@ -143,7 +143,8 @@ int run_sys(const char *path, u64 limit, u32 sig)
                    memory it was given on the other node is still just memory. */
                 mem_w32(translate(pick + 0x7Cu, 0), 0);
                 mem_w32(translate(ctx + 0xB4u, 0), 0);
-                mem_w32(translate(0xFBFFE0F0u, 0), pick);   /* curproc */
+                runq_remove(pick);                          /* the scheduler's dequeue */
+                set_curproc(pick, ctx);                      /* curproc, both copies */
                 WR(2, ctx);
                 cpu.pc = 0xC0017498u;                       /* load_context */
                 continue;

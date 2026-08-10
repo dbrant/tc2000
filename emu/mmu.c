@@ -213,6 +213,24 @@ u32 translate(u32 va, int code)
        the kernel mapped into kernel VA go through devmap; the rest is the fixed
        VA-KOFF direct map; >=0xE0000000 is identity device space. */
     if (realmm && va >= 0xC0000000u) {
+        /* ★ The u-area + kernel-stack window sits inside what is otherwise
+           identity device space, but it is the one kernel VA range that is
+           PER-PROCESS.  load_context (c0017498) rewrites its four page-table
+           descriptors from ctx+0x98 and then calls pmap_activate, so each
+           process sees its own u-area and kernel stack at the same fixed VA.
+           Resolving it as identity gave every process ONE shared u-area --
+           which is why u.u_procp still named the parent after a fork switched
+           to the child, and why the child's first sleep() then panicked on the
+           parent's run-queue links.  Only under --dataphys, where the kernel's
+           own tables are readable; a walk miss (early boot, before any context
+           exists) falls back to identity, so nothing that worked before this
+           moves. */
+        if (peru && kdata_off && va >= UAREA_LO && va < UAREA_HI) {
+            u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
+            u32 pa;
+            if (!(apr & 1) || !mmu_walk(apr, va, &pa)) return va;
+            return pa;
+        }
         if (va >= 0xE0000000u) return va;
         u32 dp = devmap_lookup(va & ~0xFFFu);
         if (dp) return dp | (va & 0xFFF);

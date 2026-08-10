@@ -52,6 +52,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--procexp"))    procexp = 1;
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
         else if (!strcmp(argv[i], "--hwfault"))    hwfault = 1;
+        else if (!strcmp(argv[i], "--peru"))       peru = 1;
         else if (!strcmp(argv[i], "--procexec"))   { procexp = 1; procexec = 1; }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
