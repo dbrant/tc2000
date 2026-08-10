@@ -76,6 +76,7 @@ int  vmexp;            /* --vmexp: at boot-complete, drive kernel VM funcs via R
 u32  procexp_cluster;  /* logical cluster our real process runs in */
 u32  procexp_pid;      /* its pid: only it and its descendants get dispatched */
 u32  procexp_proc;     /* its proc struct, for the descendant test */
+u32  pwatch_lo, pwatch_hi;
 int  procexec;        /* let the kernel's own execve load the binary (--uprog) */
 int  procexp;         /* create a real proc with the kernel's newproc */
 int  ctxtrace;         /* --ctxtrace: log every distinct load_context() context */

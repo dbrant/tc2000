@@ -235,8 +235,12 @@ int run_sys(const char *path, u64 limit, u32 sig)
         /* _panic: the message is the single most useful thing the kernel can
            tell us, and it is lost if we only catch the throttled printf. */
         if (cpu.pc == 0xC005AFE0u) {
+            /* The message pointer is a kernel VA -- mem_cstr takes a PHYSICAL
+               address, so under --dataphys (where kernel VA != PA) it silently
+               produced an empty string and every panic printed blank.  Read it
+               through translate(). */
             char m[160];
-            mem_cstr(RD(2), m, sizeof m);
+            uread_str(RD(2), m, sizeof m);
             printf("[PANIC] %s  (from %08x, @%llu)\n", m, RD(1),
                    (unsigned long long)cpu.count);
             printf("[PANIC] last sleep: chan=%08x from=%08x\n",

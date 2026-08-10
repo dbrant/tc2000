@@ -109,6 +109,14 @@ void ctx_report(void)
    without having to guess the address first. */
 static u64 wmem_n;
 u64 wtrace_n, wtrace_left, wtrace_at;
+void pwatch_hit(u32 a, u8 v)
+{
+    static unsigned n;
+    if (n++ < 40)
+        printf("[pwatch] PA %08x <= %02x  pc=%08x r1=%08x r31=%08x sup=%d @%llu\n",
+               a, v, dbg_pc, RD(1), RD(31),
+               (cpu.cr[1] & 0x80000000u) ? 1 : 0, (unsigned long long)cpu.count);
+}
 int stwatch_active;
 static u32 stwatch_ret;
 static int stwatch_done;

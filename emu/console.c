@@ -264,16 +264,18 @@ int disk_syscall(u32 sysno, u32 tpc)
         break;
     }
     case 3: {                                          /* read(fd, buf, n) */
+        if (ubuf_fault(a1, a2, 1, tpc)) return 1;
         u8 *tmp = calloc(a2 ? a2 : 1, 1);
         if (fseek(disk_img, (long)disk_off[a0], SEEK_SET) == 0)
             if (fread(tmp, 1, a2, disk_img) == 0) { /* past EOF -> zeros */ }
-        for (u32 i = 0; i < a2; i++) mem_w8(translate(a1 + i, 0), tmp[i]);
+        uwrite_mem(a1, tmp, a2);
         free(tmp);
         disk_off[a0] += a2;
         ret = (long)a2;
         break;
     }
     case 4: {                                          /* write(fd, buf, n) */
+        if (ubuf_fault(a1, a2, 0, tpc)) return 1;
         u8 *tmp = malloc(a2 ? a2 : 1);
         for (u32 i = 0; i < a2; i++) tmp[i] = mem_r8(translate(a1 + i, 0));
         if (fseek(disk_img, (long)disk_off[a0], SEEK_SET) == 0)
@@ -294,11 +296,12 @@ int disk_syscall(u32 sysno, u32 tpc)
         u32 flag = mem_r32(translate(a2 + 0x0c, 0));
         u32 buf  = mem_r32(translate(a2 + 0x10, 0));
         u32 n = cnt * 512;
+        if (ubuf_fault(buf, n, (flag & 0x01000000u) ? 1 : 0, tpc)) return 1;
         u8 *tmp = calloc(n ? n : 1, 1);
         if (flag & 0x01000000u) {                      /* read */
             if (fseek(disk_img, (long)blk * 512, SEEK_SET) == 0)
                 if (fread(tmp, 1, n, disk_img) == 0) { /* EOF -> zeros */ }
-            for (u32 i = 0; i < n; i++) mem_w8(translate(buf + i, 0), tmp[i]);
+            uwrite_mem(buf, tmp, n);
         } else {                                       /* write */
             for (u32 i = 0; i < n; i++) tmp[i] = mem_r8(translate(buf + i, 0));
             if (fseek(disk_img, (long)blk * 512, SEEK_SET) == 0)
@@ -346,13 +349,14 @@ int hostfile_syscall(u32 sysno, u32 tpc)
         if (off >= hostfile_vsize) { ret = 0; break; } /* true EOF (past padding) */
         u32 want = a2;
         if (off + want > hostfile_vsize) want = hostfile_vsize - off;
+        if (ubuf_fault(a1, want, 1, tpc)) return 1;
         u8 *tmp = calloc(want ? want : 1, 1);          /* zero-filled */
         if (off < hostfile_size) {                     /* real bytes, then zeros */
             u32 rn = (off + want <= hostfile_size) ? want : (hostfile_size - off);
             if (fseek(hostfile_img, (long)off, SEEK_SET) == 0)
                 if (fread(tmp, 1, rn, hostfile_img) == 0) { /* short: leave zeros */ }
         }
-        for (u32 i = 0; i < want; i++) mem_w8(translate(a1 + i, 0), tmp[i]);
+        uwrite_mem(a1, tmp, want);
         free(tmp);
         host_off[a0] += want;
         ret = (long)want;
@@ -390,6 +394,7 @@ int console_syscall(u32 sysno, u32 tpc)
         if (!fd_is_console(a0)) return 0;
         u8 tmp[4096];
         u32 total = a2 < (1u << 20) ? a2 : (1u << 20);
+        if (ubuf_fault(a1, total, 0, tpc)) return 1;
         for (u32 off = 0; off < total; ) {
             u32 chunk = total - off;
             if (chunk > sizeof tmp) chunk = sizeof tmp;

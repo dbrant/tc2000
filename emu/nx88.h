@@ -290,8 +290,11 @@ static inline u8 *page_of(u32 a)
 
 static inline u8 mem_r8(u32 a) { return page_of(a)[a & 4095]; }
 
+extern u32 pwatch_lo, pwatch_hi;
+void pwatch_hit(u32 a, u8 v);
 static inline void mem_w8(u32 a, u8 v)
 {
+    if (pwatch_hi && a >= pwatch_lo && a < pwatch_hi) pwatch_hit(a, v);
     page_of(a)[a & 4095] = v;
 }
 
@@ -386,6 +389,7 @@ int disk_syscall(u32 sysno, u32 tpc);
 int hostfile_syscall(u32 sysno, u32 tpc);
 int uread_str(u32 va, char *buf, size_t n);
 u32 uwrite_mem(u32 va, const u8 *src, u32 n);
+int ubuf_fault(u32 va, u32 len, int forwrite, u32 tpc);
 int run_sys(const char *path, u64 limit, u32 sig);
 
 #endif /* NX88_H */

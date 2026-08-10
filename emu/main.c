@@ -64,6 +64,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--procexp"))    procexp = 1;
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
         else if (!strcmp(argv[i], "--init"))       run_init = 1;
+        else if (!strncmp(argv[i], "--pwatch=", 9)) {
+            char *e; pwatch_lo = (u32)strtoul(argv[i]+9, &e, 0);
+            pwatch_hi = pwatch_lo + ((*e == ':') ? (u32)strtoul(e+1,0,0) : 4u);
+        }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
             wmem_lo = (u32)strtoul(argv[i] + 7, &e, 0);
@@ -148,6 +152,10 @@ int main(int argc, char **argv)
                 "               addresses -- answers \"which way did THIS call\n"
                 "               branch\", which the aggregate --pchist cannot\n"
                 "  --traceat=C  arm --wtrace at instruction count C instead\n"
+                "  --wmem=VA[:len[:max]]   log writes to a VIRTUAL range\n"
+                "  --pwatch=PA[:len]       log writes to a PHYSICAL range -- the\n"
+                "               one that catches a bad translation scribbling\n"
+                "               over memory its VA never named\n"
                 "  --uprog=PATH run the guest's PATH as a REAL nX process --\n"
                 "               the kernel's own execve, fork, copy-on-write,\n"
                 "               faults and scheduler.  --uarg=/--uenv= supply\n"
