@@ -223,9 +223,7 @@ void tlb_flush(void)
    have to redo that copy itself, because pmap_copy_page's scratch window landed
    in unbacked space; see scratch_base() below.  It does not any more.)
 
-   Only under --hwfault: that is the one path that can resolve it (the fallback
-   resolver calls vm_map_pageable, which reports success on a COW entry without
-   materialising anything).  Returns 1 if a fault was recorded. */
+   Returns 1 if a fault was recorded. */
 static int cow_fault(u32 va)
 {
     if (!hwfault || !procexp || !xlat_write || ufault_pending) return 0;
@@ -386,12 +384,11 @@ u32 translate(u32 va, int code)
        which supplies node-correct physical addresses for kernel memory */
     u32 pa, pd = 0;
     if (!walk_fb(apr, va, code, &pa, &pd)) {
-        /* A real user process (--procexp) faults: the kernel's exec maps its
+        /* A real user process faults: the kernel's exec maps its
            image demand-paged, so the first touch of every page misses here.
            Record it and abort the instruction; run_sys resolves it through the
-           kernel's own paging path and re-executes.  Under --hwfault the same
            hook delivers a real vector 2 (code) / 3 (data) access fault to the
-           kernel instead -- see deliver_fault and the note in run_sys. */
+           kernel -- see deliver_fault and the note in run_sys. */
         if (procexp && !ufault_pending) {
             ufault_pending = 1;
             ufault_va = va;

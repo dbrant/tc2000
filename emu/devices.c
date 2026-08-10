@@ -18,7 +18,7 @@ void memop(u32 sub, u32 D, u32 ea)
     xlat_write = 0;
     /* Page fault: abort before any memory or register is touched, so the
        instruction can simply be re-executed once the page is there.  Record
-       whether it was a store: --hwfault has to tell the kernel's vm_fault
+       whether it was a store: fault delivery has to tell the kernel's vm_fault
        which protection to fault the page in for, and only a WRITE fault
        breaks a copy-on-write mapping.  0x08-0x0B are the stores, 0x00/0x01
        are xmem (read-modify-write, so also a write). */

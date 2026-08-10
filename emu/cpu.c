@@ -471,7 +471,7 @@ int proc_experiment(void)
        exit cleanly) but leaves the kernel's OWN bookkeeping -- text/data/stack
        sizes and the break -- unset, so the first sbrk fails and `ls` dies with
        "out of memory" in obreak.
-       --procexec instead maps a nine-instruction stub that calls execve() and
+       --uprog instead maps a nine-instruction stub that calls execve() and
        lets the kernel load the binary itself.  That is the real destination, but
        it is BLOCKED: the kernel's own software translation of a user address
        (user_vtop, c00ab278) reads the page tables at the physical addresses it
@@ -672,7 +672,7 @@ int proc_experiment(void)
     mem_w32(translate(ctx + 0x80, 0), tramp);     /* resume PC */
     runq_remove(p);                               /* the scheduler's dequeue */
     /* ★ Take every OTHER runnable process off the run queue.  Once the
-       scheduler really works (--peru) it finally dispatches init, which has sat
+       scheduler really works it finally dispatches init, which has sat
        runnable since boot; init forks a child that spins forever rescanning a
        directory (196k scans and counting) and starves the program we were
        actually asked to run.  This harness exists to run ONE program under the
@@ -940,7 +940,7 @@ int step(void)
     if (stwatch_pc) stwatch_tick(pc);
     if (regfind_val) regfind_tick(pc);
 
-    /* --hwfault: skip the kernel's software replay of the aborted data
+    /* Skip the kernel's software replay of the aborted data
        transaction (data_access_emulation, c00aaa44, which exreturn calls once
        vm_fault has made the page present).  Our fault model aborts the
        faulting instruction before any register or byte of memory is touched

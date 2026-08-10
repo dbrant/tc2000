@@ -33,8 +33,8 @@ int main(int argc, char **argv)
         /* --- user-mode program launch --- */
         /* --shell: boot, then hand the terminal to the guest's own /bin/sh,
            run as a REAL nX process.  It used to mean the synthetic process
-           model; that model is gone (see the note above --procexec), so this is
-           now just a set of defaults over --procexec. */
+           model; that model is gone, so this is now just a set of defaults
+           over the real process path. */
         else if (!strcmp(argv[i], "--shell")) {
             interactive = 1; deliver_traps = 1;
             trace_traps = 0; quiet_uproc = 1;
@@ -51,14 +51,19 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--vmprobe"))    vmprobe = 1;
         else if (!strcmp(argv[i], "--vmexp"))      vmexp = 1;
         else if (!strcmp(argv[i], "--ctxtrace"))   ctxtrace = 1;
+        /* --handload=PATH: run a HOST a.out that is not in the guest filesystem
+           at all -- the emulator loads the image into a real kernel process
+           instead of letting the kernel's execve do it.  That is the ONLY thing
+           this mode still offers; everything else is better served by --uprog.
+           `--procexp` is the old spelling and stays as a hidden alias, but it
+           reads like `--procexec' and means close to the opposite, which is
+           exactly why the flag was renamed. */
+        else if (!strncmp(argv[i], "--handload=", 11))
+            { procexp = 1; uprog_path = argv[i] + 11;
+              deliver_traps = 1; trace_traps = 1; }
         else if (!strcmp(argv[i], "--procexp"))    procexp = 1;
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
-        else if (!strcmp(argv[i], "--hwfault"))    hwfault = 1;
-        else if (!strcmp(argv[i], "--peru"))       peru = 1;
-        else if (!strcmp(argv[i], "--no-hwfault")) no_hwfault = 1;
-        else if (!strcmp(argv[i], "--no-peru"))    no_peru = 1;
         else if (!strcmp(argv[i], "--init"))       run_init = 1;
-        else if (!strcmp(argv[i], "--procexec"))   { procexp = 1; procexec = 1; }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
             wmem_lo = (u32)strtoul(argv[i] + 7, &e, 0);
@@ -92,36 +97,40 @@ int main(int argc, char **argv)
        execve do it), so do not override that one. */
     if ((uprog_path || interactive) && !procexp) { procexp = 1; procexec = 1; }
 
-    /* --procexec runs the kernel's own exec, which needs kernel memory to be
-       coherent -- so it implies --dataphys.  It also defaults the machine to a
-       genuinely single node: with 64 nodes the kernel puts every forked child
-       on another node's run queue, which no CPU here executes, and the emulator
-       has to stand in for the missing processors.  One node keeps forks local
-       AND boots 15x faster (3.7M instructions instead of 55M).  An explicit
-       --nodes=N still wins.
+    /* Real MC88100 access-fault delivery and per-process u-areas are now
+       UNCONDITIONAL for both process paths.  They used to be --hwfault/--peru
+       with --no-hwfault/--no-peru to opt back out, for A/B comparison while
+       they were new.  That question is settled: neither alone can run a forked
+       shell (without peru curproc still names the parent after a fork and the
+       first sleep panics; without hwfault the fallback resolver calls
+       vm_map_pageable, which reports success on a copy-on-write entry without
+       materialising anything).  Turning them on for the hand-load path costs
+       nothing -- measured instruction-identical, because that path pre-loads
+       its image and so takes no user faults at all.
 
-       It also implies --hwfault and --peru, which are a MATCHED PAIR and are
-       what make the kernel's real process path actually work:
-         --hwfault  delivers real MC88100 access faults, the only route that
-                    can break copy-on-write;
-         --peru     gives each process its own u-area, without which curproc
-                    still names the parent after a fork and the first sleep
-                    panics.
-       Neither alone is enough -- with only --peru a forked shell dies on
-       "cannot page in 00000000 (code)", with only --hwfault on the old
-       sleep_and_unlock panic.  Together /bin/sh runs a script.  --no-hwfault
-       and --no-peru put either back the old way for A/B comparison. */
+       Removing the opt-outs is what let the two remaining emulator stand-ins go
+       with them: the hand-dispatch scavenger (the emulator picking a runnable
+       proc and load_context'ing it, standing in for the 63 CPUs we do not
+       model) and the fallback fault resolver.  Both were reachable only with
+       peru/hwfault off. */
+    if (procexp) { hwfault = 1; peru = 1; }
+
+    /* --uprog/--shell (i.e. procexec) run the kernel's own exec, which needs
+       kernel memory to be coherent -- so it implies --dataphys.  It also
+       defaults the machine to a genuinely single node: with 64 nodes the kernel
+       puts every forked child on another node's run queue, which no CPU here
+       executes.  One node keeps forks local AND boots 15x faster (3.7M
+       instructions instead of 55M).  An explicit --nodes=N still wins. */
     if (procexec) {
         dataphys = 1;
         if (!cfg_nodes) cfg_nodes = 1;
-        hwfault = !no_hwfault;
-        peru    = !no_peru;
     }
     if (nwords) path = words[0];
     if (!path) {
         fprintf(stderr,
                 "usage: nx88 user <binary> [args...] [-v] [--limit=N]\n"
                 "       nx88 sys  <vmunix> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
+                "                          [--uprog=PATH] [--handload=HOSTPATH]\n"
                 "                          [--nodes=N] [--identity]\n"
                 "                          [--tape=PATH] [--disk=PATH]\n"
                 "                          [--console-port=N]\n"
@@ -139,13 +148,16 @@ int main(int argc, char **argv)
                 "               addresses -- answers \"which way did THIS call\n"
                 "               branch\", which the aggregate --pchist cannot\n"
                 "  --traceat=C  arm --wtrace at instruction count C instead\n"
-                "  --procexec --uprog=PATH  run PATH as a REAL nX process: the\n"
-                "               kernel's own execve, fork, copy-on-write and\n"
-                "               scheduler.  Implies --dataphys, --nodes=1 and\n"
-                "               --hwfault/--peru (real MC88100 access faults and\n"
-                "               per-process u-areas -- a matched pair; neither\n"
-                "               alone is enough).  --no-hwfault / --no-peru opt\n"
-                "               back out for A/B comparison.\n"
+                "  --uprog=PATH run the guest's PATH as a REAL nX process --\n"
+                "               the kernel's own execve, fork, copy-on-write,\n"
+                "               faults and scheduler.  --uarg=/--uenv= supply\n"
+                "               argv/envp.  Implies --dataphys and --nodes=1;\n"
+                "               an explicit --nodes=N still wins.\n"
+                "  --handload=HOSTPATH  run a HOST a.out that is not in the\n"
+                "               guest filesystem at all: the emulator loads the\n"
+                "               image into a real kernel process instead of\n"
+                "               letting execve do it.  Single programs only --\n"
+                "               a hand-loaded program that forks does not work.\n"
                 "  --init       also let init (pid 1) run.  Off by default: it\n"
                 "               is runnable from boot, and once the scheduler\n"
                 "               works it forks a child that READS fd 0 -- so it\n"

@@ -126,44 +126,21 @@ int run_sys(const char *path, u64 limit, u32 sig)
             if (vmexp) { vm_experiment(); break; }      /* step-2 VM RPC probe */
             break;
         }
-        /* --procexp: the process has exited and the kernel switched back to
+        /* The process has exited and the kernel switched back to
            proc0, which we parked on a br-to-self.  Report and stop. */
         if (procexp && cpu.pc == PROCEXP_IDLE) {
-            /* CPU 0 has nothing to run.  The kernel believes it has 64
-               processors, so a fork inside our logical cluster queues the child
-               on ANOTHER node's run queue -- and that node's CPU never executes
-               here.  Stand in for it: dispatch any still-runnable proc from our
-               own cluster, whatever node it was queued on.  Only procs in our
-               cluster are eligible, which excludes the boot's 64 idle threads
-               (all cluster 0). */
-            u32 pb = mem_r32(translate(0xC1015758u, 0));
-            u32 np = mem_r32(translate(0xC1014B80u, 0));
-            u32 pick = 0, pickpid = 0;
-            for (u32 i = 0; procexp_cluster && pb && i < np; i++) {
-                u32 q = pb + i * 512u;
-                if (mem_r32(translate(q + 0x40u, 0)) != 3u ||
-                    mem_r32(translate(q + 0x90u, 0)) != procexp_cluster)
-                    continue;
-                /* Highest pid first: that is the newest process, i.e. the child
-                   a fork just made, rather than init sitting runnable since
-                   boot on a node whose CPU never runs. */
-                u32 pid = mem_r32(translate(q + 0x4Cu, 0)) >> 16;
-                if (pid < procexp_pid) continue;   /* ours and its children only */
-                /* ...and REALLY only ours: walk p_pptr (+0x18) up to our own
-                   proc.  Under --peru the kernel's scheduler works well enough
-                   to finally run init (pid 1, runnable but never dispatched
-                   since boot), and init promptly forks -- a child that passes
-                   both the cluster and the pid test but has nothing to do with
-                   us.  Dispatching it just spins the machine after our own
-                   process has already exited cleanly. */
-                u32 a = q;
-                for (int hop = 0; a && a != procexp_proc && hop < 32; hop++)
-                    a = mem_r32(translate(a + 0x18u, 0));
-                if (a != procexp_proc) continue;
-                if (pid >= pickpid) { pickpid = pid; pick = q; }
-            }
+            /* CPU 0 has nothing to run.  Ask the KERNEL's own scheduler for
+               the next process -- there is no hand-dispatch here any more.
+               proc0 is parked on a br-to-self so it never yields and the
+               scheduler never gets a turn; that is the only reason the emulator
+               ever had to pick a process itself (it used to scan the proc table
+               for a runnable descendant and load_context it by hand, standing
+               in for the 63 CPUs this model does not run).  Per-process u-areas
+               made the kernel's scheduler work properly and retired it. */
             /* Anything of ours still in play -- running, runnable or asleep --
                but not a zombie (nobody reaps ours; proc0 is their parent). */
+            u32 pb = mem_r32(translate(0xC1015758u, 0));
+            u32 np = mem_r32(translate(0xC1014B80u, 0));
             int alive = 0;
             for (u32 i = 0; pb && i < np && !alive; i++) {
                 u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
@@ -173,7 +150,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     a2 = mem_r32(translate(a2 + 0x18u, 0));
                 if (a2 == procexp_proc) alive = 1;
             }
-            /* ★★ Under --peru, let the KERNEL's own scheduler do the
+            /* ★★ Let the KERNEL's own scheduler do the
                dispatching -- no hand-dispatch at all.  proc0 is parked on a
                br-to-self here, so it never yields and the scheduler never gets
                a turn; that is the ONLY reason this hook ever had to pick a
@@ -214,35 +191,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     continue;
                 }
                 printf("[procexp] scheduler made no progress -- deadlock?\n");
-            }
-            if (peru) pick = 0;        /* --peru never hand-dispatches */
-            if (pick) {
-                u32 ctx = mem_r32(translate(pick + 0xC8u, 0));
-                printf("[procexp] dispatching proc %08x (pid %u, node %u) "
-                       "@%llu\n", pick,
-                       mem_r32(translate(pick + 0x4Cu, 0)) >> 16,
-                       mem_r32(translate(pick + 0x7Cu, 0)),
-                       (unsigned long long)cpu.count);
-                /* Re-home it to node 0.  fork inside a multi-node cluster puts
-                   the child on another node, and the kernel checks that a proc
-                   runs on its home node ("acallpsig not on home node",
-                   c00aba7c: proc+0x7c vs the CPU's node at [0xC0014008]).  We
-                   only ever execute node 0's CPU, so make node 0 its home; the
-                   memory it was given on the other node is still just memory. */
-                mem_w32(translate(pick + 0x7Cu, 0), 0);
-                mem_w32(translate(ctx + 0xB4u, 0), 0);
-                runq_remove(pick);                          /* the scheduler's dequeue */
-                /* ...and put proc0 back on the queue, exactly as the initial
-                   hand-dispatch does.  We are standing at the idle sentinel
-                   because the scheduler picked proc0 and thereby DEQUEUED it;
-                   abandoning it again leaves nothing for the scheduler to find
-                   once this process exits, and the machine idles in swtch
-                   forever instead of coming back here to report. */
-                runq_add(mem_r32(translate(peru ? 0xC0014044u : 0xFBFFE0F0u, 0)));
-                set_curproc(pick, ctx);                      /* curproc, both copies */
-                WR(2, ctx);
-                cpu.pc = 0xC0017498u;                       /* load_context */
-                continue;
             }
             if (interactive)
                 printf("\n[halt] shell exited -- machine halted.\n");
@@ -346,88 +294,28 @@ int run_sys(const char *path, u64 limit, u32 sig)
         }
         if (ufault_pending) {
             /* A real process touched a page its exec mapped demand-paged.
-               --hwfault takes the faithful route below (vector 2/3 to the
-               kernel's own handlers).  Without it, resolve the fault the way
-               the kernel would and re-execute: vm_map_pageable over the
-               faulting page on the current process's own map.  That cannot do
-               copy-on-write -- vm_map_pageable(wire) reports success on a COW
-               entry without materialising the page -- which is what --hwfault
-               exists to fix. */
-            /* This kernel's VM granularity is 8K everywhere (vm_allocate,
-               vm_map_u_area_create, and pmap_enter's descriptor pairs), so
-               resolve a whole 8K block -- asking it to wire a 4K sub-range
-               splits entries and leaves the text page zero-filled. */
-            u32 va = ufault_va & ~0x1FFFu;
-            u32 cp = mem_r32(translate(0xFBFFE0F0u, 0));
-            u32 map = cp ? mem_r32(translate(cp + 0xD4u, 0)) : 0;
+               Hand it to the kernel's own MC88100 handler as a genuine access
+               fault -- vector 2 for an instruction fetch, 3 for data -- and let
+               its vm_fault resolve it.  This is the only route that can do
+               copy-on-write or vnode paging.
+
+               There used to be a fallback here (--no-hwfault) that resolved
+               the fault itself with vm_map_pageable over the faulting 8K.  It
+               could never break copy-on-write -- vm_map_pageable(wire) reports
+               success on a COW entry without materialising the page -- so it
+               could not run a forked shell, and it is gone. */
             ufault_pending = 0;
-            /* --hwfault: hand it to the kernel's own handler instead of
-               resolving it ourselves.  This is the faithful path and the only
-               one that can do copy-on-write (a forked child's text) or vnode
-               paging -- vm_map_pageable reports success on a COW entry without
-               materialising the page. */
-            if (hwfault) {
-                if (!interactive && ufaults++ < (verbose_sys ? 100000u : 12u))
-                    printf("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",
-                           real_pid(), ufault_va,
-                           ufault_code ? "code" : "data",
-                           ufault_code ? "" : (ufault_write ? " write" : " read"),
-                           ufault_pc,
-                           (cpu.cr[1] & 0x80000000u) ? "SUPERVISOR" : "user",
-                           (unsigned long long)cpu.count);
-                deliver_fault(ufault_code ? 2u : 3u, cpu.pc, ufault_va,
-                              ufault_code, ufault_write, ufault_width);
-                continue;
-            }
-            /* Run the kernel functions below on a KERNEL stack.  A fault taken
-               in user mode leaves r31 pointing at the USER stack, and kcall
-               does not change it -- so vm_map_pageable's own prologue pushed
-               onto user memory, corrupting it, and eventually faulted itself
-               (pc=c0092354, its `st r1,[r31+0x34]`).  cr17/SR1 is the kernel
-               stack the trap path would have switched to; use that, and be in
-               supervisor mode while doing it. */
-            u32 sp0 = RD(31), psr0 = cpu.cr[1];
-            if (!(psr0 & 0x80000000u)) {
-                WR(31, cpu.cr[17]);
-                cpu.cr[1] = psr0 | 0x80000000u;
-            }
-            int ok = map && !kcall(0xC0092350u, map, va, va + 0x2000u, 1, 0);
-            if (!ok && map) {
-                /* Not in the map at all -- a stack that has to grow, which the
-                   kernel's own fault path would do for us.  Extend it with the
-                   kernel's vm_allocate at that exact page, then wire it.
-                   proc+0xe0 is a zero, unused word to hand vm_allocate as its
-                   in/out address. */
-                u32 slot = cp + 0xE0u;
-                mem_w32(translate(slot, 0), va);
-                ok = !kcall(0xC008EB6Cu, map, slot, 0x2000u, 0x90, 0xFFFFFFFFu)
-                  && !kcall(0xC0092350u, map, va, va + 0x2000u, 1, 0);
-            }
-            WR(31, sp0);                        /* back to the faulting context */
-            cpu.cr[1] = psr0;
-            if (!ok) {
-                printf("[ufault] cannot page in %08x (%s) from pc=%08x for "
-                       "proc %08x @%llu\n", ufault_va,
-                       ufault_code ? "code" : "data", ufault_pc, cp,
+            if (!interactive && ufaults++ < (verbose_sys ? 100000u : 12u))
+                printf("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",
+                       real_pid(), ufault_va,
+                       ufault_code ? "code" : "data",
+                       ufault_code ? "" : (ufault_write ? " write" : " read"),
+                       ufault_pc,
+                       (cpu.cr[1] & 0x80000000u) ? "SUPERVISOR" : "user",
                        (unsigned long long)cpu.count);
-                break;
-            }
-            /* If the same page keeps faulting, the resolver did not actually
-               make it present -- stop instead of spinning forever. */
-            static u32 last_va; static unsigned repeat;
-            if (va == last_va) {
-                if (++repeat > 4) {
-                    printf("[ufault] %08x (%s) still faulting after %u "
-                           "resolutions -- giving up @%llu\n", ufault_va,
-                           ufault_code ? "code" : "data", repeat,
-                           (unsigned long long)cpu.count);
-                    break;
-                }
-            } else { last_va = va; repeat = 0; }
-            if (ufaults++ < 24)
-                printf("[ufault] %08x (%s) resolved\n", ufault_va,
-                       ufault_code ? "code" : "data");
-            continue;                       /* pc unchanged: re-execute */
+            deliver_fault(ufault_code ? 2u : 3u, cpu.pc, ufault_va,
+                          ufault_code, ufault_write, ufault_width);
+            continue;
         }
         if (step()) {
             /* Faithful userland: deliver real synchronous traps (syscalls via

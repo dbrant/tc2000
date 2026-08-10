@@ -76,24 +76,23 @@ int  vmexp;            /* --vmexp: at boot-complete, drive kernel VM funcs via R
 u32  procexp_cluster;  /* logical cluster our real process runs in */
 u32  procexp_pid;      /* its pid: only it and its descendants get dispatched */
 u32  procexp_proc;     /* its proc struct, for the descendant test */
-int  procexec;        /* --procexec: let the kernel's own execve load the binary */
-int  procexp;         /* --procexp: create a real proc with the kernel's newproc */
+int  procexec;        /* let the kernel's own execve load the binary (--uprog) */
+int  procexp;         /* create a real proc with the kernel's newproc */
 int  ctxtrace;         /* --ctxtrace: log every distinct load_context() context */
 u32  wmem_lo, wmem_hi; /* --wmem=A[:L]: log stores into this virtual range */
 u64  wmem_max = 400;
 u64  kwalk_user;       /* user-space walks resolved through the kernel's real tables */
 int  dataphys;         /* --dataphys: load kernel data at the PA nX expects */
 u32  kdata_va, kdata_off;  /* start VA and VA-PA offset of that region */
-int  hwfault;          /* --hwfault: deliver real MC88100 access faults */
-int  peru;             /* --peru: per-process u-areas (see mmu.c/translate) */
-int  no_hwfault, no_peru;   /* --no-hwfault / --no-peru: opt back out */
+int  hwfault;          /* real MC88100 access faults (always on under procexp) */
+int  peru;             /* per-process u-areas (always on under procexp) */
 int  run_init;         /* --init: leave init (pid 1) on the run queue */
 int  ufault_pending;   /* a real process faulted; run_sys pages it in and retries */
 u32  ufault_va, ufault_pc;
 int  ufault_code;
 int  ufault_write;     /* the faulting access was a store (or xmem) */
 int  xlat_write;       /* memop: the access being translated is a store */
-u64  cow_faults;       /* copy-on-write faults raised (--hwfault) */
+u64  cow_faults;       /* copy-on-write write faults raised */
 u32  ufault_width;     /* its width in bytes (1/2/4/8) */
 u64  ufaults;
 u64  kdis_n, kfall_n;  /* kernel-VA table/linear disagreements; table misses */

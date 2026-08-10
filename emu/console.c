@@ -436,7 +436,7 @@ int console_syscall(u32 sysno, u32 tpc)
    The globals stay as the working copy (every existing user reads them
    directly and stays unchanged); this just saves and restores them around a
    change of current process, seeding a process first seen from its PARENT's
-   set, which is exactly fork's inheritance.  Only under --procexp, where there
+   set, which is exactly fork's inheritance.  Only where there
    are real processes to tell apart.
    --------------------------------------------------------------------------- */
 #define FDSETS 24
