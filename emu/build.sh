@@ -1,11 +1,28 @@
 #!/bin/sh
-# Build nx88 from the split sources.  MSYS2 UCRT64 gcc:
-#   export PATH="/c/msys64/ucrt64/bin:$PATH" && ./build.sh
-# The running nx88.exe holds a Windows lock, so kill it first.
+# Build nx88 from the split sources.
+#
+#   ./build.sh
+#
+# Windows (MSYS2 UCRT64): export PATH="/c/msys64/ucrt64/bin:$PATH" first.  The
+# running nx88.exe holds a file lock there, so it is killed before linking, and
+# the telnet console needs winsock.  Neither applies on macOS/Linux.
+#
+# The binary keeps the name nx88.exe on every platform so the commands in
+# BOOT.md (and everyone's shell history) work unchanged on both machines.
 set -e
-taskkill //F //IM nx88.exe >/dev/null 2>&1 || true
-gcc -O2 -Wall -o nx88.exe \
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        taskkill //F //IM nx88.exe >/dev/null 2>&1 || true
+        LIBS="-lws2_32"
+        ;;
+    *)
+        LIBS=""
+        ;;
+esac
+
+${CC:-cc} -O2 -Wall -o nx88.exe \
     globals.c memory.c devices.c mmu.c cpu.c aout.c ffs.c kmsg.c \
     usermode.c console.c proc.c sysmode.c main.c \
-    -lws2_32
+    $LIBS
 echo "built nx88.exe"

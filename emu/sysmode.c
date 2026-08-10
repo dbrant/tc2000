@@ -3,6 +3,30 @@
    cross-module declarations live in nx88.h. */
 #include "nx88.h"
 
+/* Snapshot the kernel's process table: who exists, what state they are in, and
+   what they are asleep on.  Printed with -v when the run stops, which is the
+   only way to see WHY a run went idle -- the machine sitting in swtch tells you
+   nothing by itself. */
+void proc_table_dump(void)
+{
+    u32 pb = mem_r32(translate(0xC1015758u, 0));
+    u32 np = mem_r32(translate(0xC1014B80u, 0));
+    printf("  proc table (stat: 1=SLEEP 3=RUN 4=IDL 5=ZOMB):\n");
+    for (u32 i = 0, shown = 0; pb && i < np && shown < 16; i++) {
+        u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
+        if (!st) continue;
+        shown++;
+        printf("    proc %08x pid %-5u stat %u  wchan %08x  link %08x rlink %08x"
+               "  runq %08x  parent %08x  clu %u\n",
+               q, mem_r32(translate(q + 0x4Cu, 0)) >> 16, st,
+               mem_r32(translate(q + 0x44u, 0)),
+               mem_r32(translate(q, 0)), mem_r32(translate(q + 4u, 0)),
+               mem_r32(translate(q + 0x80u, 0)),
+               mem_r32(translate(q + 0x18u, 0)),
+               mem_r32(translate(q + 0x90u, 0)));
+    }
+}
+
 int run_sys(const char *path, u64 limit, u32 sig)
 {
     AOut a;
@@ -126,6 +150,17 @@ int run_sys(const char *path, u64 limit, u32 sig)
                    boot on a node whose CPU never runs. */
                 u32 pid = mem_r32(translate(q + 0x4Cu, 0)) >> 16;
                 if (pid < procexp_pid) continue;   /* ours and its children only */
+                /* ...and REALLY only ours: walk p_pptr (+0x18) up to our own
+                   proc.  Under --peru the kernel's scheduler works well enough
+                   to finally run init (pid 1, runnable but never dispatched
+                   since boot), and init promptly forks -- a child that passes
+                   both the cluster and the pid test but has nothing to do with
+                   us.  Dispatching it just spins the machine after our own
+                   process has already exited cleanly. */
+                u32 a = q;
+                for (int hop = 0; a && a != procexp_proc && hop < 32; hop++)
+                    a = mem_r32(translate(a + 0x18u, 0));
+                if (a != procexp_proc) continue;
                 if (pid >= pickpid) { pickpid = pid; pick = q; }
             }
             if (pick) {
@@ -144,6 +179,13 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 mem_w32(translate(pick + 0x7Cu, 0), 0);
                 mem_w32(translate(ctx + 0xB4u, 0), 0);
                 runq_remove(pick);                          /* the scheduler's dequeue */
+                /* ...and put proc0 back on the queue, exactly as the initial
+                   hand-dispatch does.  We are standing at the idle sentinel
+                   because the scheduler picked proc0 and thereby DEQUEUED it;
+                   abandoning it again leaves nothing for the scheduler to find
+                   once this process exits, and the machine idles in swtch
+                   forever instead of coming back here to report. */
+                runq_add(mem_r32(translate(peru ? 0xC0014044u : 0xFBFFE0F0u, 0)));
                 set_curproc(pick, ctx);                      /* curproc, both copies */
                 WR(2, ctx);
                 cpu.pc = 0xC0017498u;                       /* load_context */
@@ -152,6 +194,8 @@ int run_sys(const char *path, u64 limit, u32 sig)
             printf("[procexp] all our processes exited @%llu\n",
                    (unsigned long long)cpu.count);
             if (!verbose_sys) break;
+            proc_table_dump();
+            if (1) break;
             for (u32 i = 0, shown = 0; pb && i < np && shown < 12; i++) {
                 u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
                 if (!st) continue;
@@ -271,8 +315,9 @@ int run_sys(const char *path, u64 limit, u32 sig)
                paging -- vm_map_pageable reports success on a COW entry without
                materialising the page. */
             if (hwfault) {
-                if (ufaults++ < 12)
-                    printf("[hwfault] %08x (%s%s) pc=%08x %s @%llu\n", ufault_va,
+                if (ufaults++ < (verbose_sys ? 100000u : 12u))
+                    printf("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",
+                           real_pid(), ufault_va,
                            ufault_code ? "code" : "data",
                            ufault_code ? "" : (ufault_write ? " write" : " read"),
                            ufault_pc,
@@ -342,11 +387,15 @@ int run_sys(const char *path, u64 limit, u32 sig)
                gated on --deliver-traps to keep the default boot untouched. */
             if (deliver_traps && trap_vector != (u32)-1
                 && cpu.cr[7] >= 0xC0000000u) {
+                /* Swap in the current process's descriptor flags before any
+                   of the fd-aware intercepts look at them. */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u))
+                    fd_switch(real_pid(), real_ppid());
                 if (trace_traps)
                     printf("[trap] pid %d vec %u pc=%08x  syscall r9=%-4u "
                            "args %08x %08x %08x @%llu\n",
-                           ucur >= 0 ? uprocs[ucur].pid : 0,
-                           trap_vector, trap_pc, RD(9), RD(2), RD(3), RD(4),
+                           real_pid(), trap_vector, trap_pc, RD(9),
+                           RD(2), RD(3), RD(4),
                            (unsigned long long)cpu.count);
                 /* stdin/stdout/stderr never reach the kernel (see the console
                    notes above); everything else goes to the real handlers. */
@@ -435,6 +484,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
     }
     /* Hit the instruction limit without derailing/panicking -- usually a spin.
        Dump the ring so the loop body is visible (nothing else caught it). */
+    if (verbose_sys && cpu.count >= limit) proc_table_dump();
     if (dump_pchist && cpu.count >= limit) {
         printf("--- last %d PCs at the instruction limit (spin?) ---\n", PCH_N);
         for (unsigned k = 0; k < PCH_N; k++)

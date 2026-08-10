@@ -465,3 +465,67 @@ int console_syscall(u32 sysno, u32 tpc)
     cpu.pc = tpc + 8;                                  /* success return    */
     return 1;
 }
+
+/* ---------------------------------------------------------------------------
+   ★ PER-PROCESS descriptor flags.
+
+   fd_console/fd_pipe/fd_disk/fd_kernel say which fd NUMBERS the emulator
+   answers for rather than the kernel.  They were one global set, which was
+   fine while only one process existed.  With real fork/exec they have to be
+   per-process: /bin/echo closes 0, 1 and 2 in its exit path, and that wiped
+   the parent shell's console -- so the shell's next read was no longer
+   intercepted, returned EOF, and it quit after a single command.
+
+   The globals stay as the working copy (every existing user reads them
+   directly and stays unchanged); this just saves and restores them around a
+   change of current process, seeding a process first seen from its PARENT's
+   set, which is exactly fork's inheritance.  Only under --procexp, where there
+   are real processes to tell apart.
+   --------------------------------------------------------------------------- */
+#define FDSETS 24
+typedef struct {
+    int  pid, used;
+    u8   con[64], pip[64], dsk[64], krn[64];
+    u32  doff[64];
+} FdSet;
+static FdSet fdsets[FDSETS];
+static int fdcur = -1;
+
+static FdSet *fdslot(int pid)
+{
+    for (int i = 0; i < FDSETS; i++)
+        if (fdsets[i].used && fdsets[i].pid == pid) return &fdsets[i];
+    for (int i = 0; i < FDSETS; i++)
+        if (!fdsets[i].used) { fdsets[i].used = 1; fdsets[i].pid = pid; return &fdsets[i]; }
+    return 0;                                  /* table full: keep the globals */
+}
+
+static void fd_save(FdSet *s)
+{
+    memcpy(s->con, fd_console, 64); memcpy(s->pip, fd_pipe, 64);
+    memcpy(s->dsk, fd_disk, 64);    memcpy(s->krn, fd_kernel, 64);
+    memcpy(s->doff, disk_off, sizeof disk_off);
+}
+
+static void fd_load(const FdSet *s)
+{
+    memcpy(fd_console, s->con, 64); memcpy(fd_pipe, s->pip, 64);
+    memcpy(fd_disk, s->dsk, 64);    memcpy(fd_kernel, s->krn, 64);
+    memcpy(disk_off, s->doff, sizeof disk_off);
+}
+
+void fd_switch(int pid, int ppid)
+{
+    if (!procexp || pid <= 0 || pid == fdcur) return;
+    if (fdcur > 0) { FdSet *o = fdslot(fdcur); if (o) fd_save(o); }
+    FdSet *n = fdslot(pid);
+    if (!n) { fdcur = pid; return; }
+    if (!n->con[0] && !n->con[1] && !n->con[2] && !n->krn[0]) {
+        /* first sight: inherit from the parent, or from whatever is live now */
+        FdSet *p = (ppid > 0) ? fdslot(ppid) : 0;
+        if (p && (p->con[0] || p->con[1] || p->con[2] || p->krn[0])) fd_load(p);
+        fd_save(n);
+    }
+    fd_load(n);
+    fdcur = pid;
+}

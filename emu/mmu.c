@@ -102,7 +102,7 @@ static u32 tab_r32(u32 pa, int biased)
 }
 
 /* Two-level MC88200 walk: area pointer -> segment table -> page table. */
-int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
+int mmu_walk(u32 apr, u32 vaddr, u32 *phys, u32 *pd_out)
 {
     u32 segtab = apr & 0xFFFFF000u;
     if (!segtab) return 0;
@@ -115,9 +115,10 @@ int mmu_walk(u32 apr, u32 vaddr, u32 *phys)
     u32 sdesc = tab_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4, biased);
     if (!(sdesc & 1)) return 0;                       /* segment invalid */
     u32 pgtab = sdesc & 0xFFFFF000u;
-    u32 pdesc = tab_r32(pgtab + ((vaddr >> 12) & 0x3FF) * 4, biased);
-    if (!(pdesc & 1)) return 0;                       /* page invalid */
-    *phys = (pdesc & 0xFFFFF000u) | (vaddr & 0xFFF);
+    u32 pdesc_v = tab_r32(pgtab + ((vaddr >> 12) & 0x3FF) * 4, biased);
+    if (!(pdesc_v & 1)) return 0;                     /* page invalid */
+    *phys = (pdesc_v & 0xFFFFF000u) | (vaddr & 0xFFF);
+    if (pd_out) *pd_out = pdesc_v;
     if (biased) kwalk_user++;
     return 1;
 }
@@ -144,9 +145,9 @@ u32 devmap_lookup(u32 va)
 
 /* Walk the kernel's active table, then (realmm) fall back to the synthetic
    direct-map table so the kernel's own vtop and the CPU's translate() agree. */
-int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
+int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys, u32 *pd_out)
 {
-    if (mmu_walk(apr, vaddr, phys)) return 1;
+    if (mmu_walk(apr, vaddr, phys, pd_out)) return 1;
     if (realmm && ndevmap) {
         u32 dp = devmap_lookup(vaddr);
         if (dp) { *phys = dp | (vaddr & 0xFFF); return 1; }
@@ -158,7 +159,7 @@ int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys)
        to both realmm (direct map) and the identity path (--ileave). */
     if (realmm || ileave_stub) {
         u32 syn = code ? CODE_SEGTAB : DATA_SEGTAB;
-        if (mmu_walk(syn | 1, vaddr, phys)) return 1;
+        if (mmu_walk(syn | 1, vaddr, phys, pd_out)) return 1;
         if (vaddr >= 0xE0000000u) { *phys = vaddr; return 1; }
     }
     return 0;
@@ -177,7 +178,7 @@ void cmmu_command(u32 base, u32 cmd)
     u32 apr   = mem_r32(base + (cmd == 0x24 ? CMMU_SAPR : CMMU_UAPR));
     int is_code = (base == 0xFFF7F000u);
     u32 phys  = 0;
-    if (walk_fb(apr, vaddr, is_code, &phys)) {
+    if (walk_fb(apr, vaddr, is_code, &phys, 0)) {
         /* Single-node machine: all RAM is on the master node (node 0).  The
            kernel derives a page's node from vtop bits 28-23 (_m_expand); our
            reported PA for kernel memory carries phantom non-zero node bits
@@ -200,6 +201,69 @@ void cmmu_command(u32 base, u32 cmd)
 void tlb_flush(void)
 {
     memset(tlb, 0, sizeof tlb);
+}
+
+/* ★ COPY-ON-WRITE.  MC88200 page descriptor bit 2 is WRITE PROTECT, and after
+   a fork the kernel maps parent and child at the SAME physical page with that
+   bit set in both -- textbook COW.  Verified live: sh's stack page bfffde9c is
+   PTE 00221001 before the fork and 00221045 in both address spaces after it,
+   same PA 00221000; and load_context writes phys|0x201 for the writable u-area
+   alias and phys|0x205 for the read-only one.
+
+   The emulator used to return the PA without looking at protection at all, so
+   a write to a COW page silently succeeded and parent and child went on
+   sharing one physical page.  That is subtle and awful: /bin/sh forked, the
+   child read its return address off what it thought was its own stack, and got
+   the value the PARENT had since pushed there -- so it returned to the wrong
+   place and ran the parent's code path instead of exec'ing the command.
+
+   Raise a write fault instead and let the kernel's own vm_fault break the COW.
+   Only under --hwfault: that is the one path that can resolve it (the fallback
+   resolver calls vm_map_pageable, which reports success on a COW entry without
+   materialising anything).  Returns 1 if a fault was recorded. */
+static int cow_fault(u32 va, u32 pa)
+{
+    if (!hwfault || !procexp || !xlat_write || ufault_pending) return 0;
+    /* ★ Remember the page we are breaking away from.  The kernel resolves this
+       fault by giving the writer a fresh page -- and never copies the old one
+       into it, so the writer's memory comes back ZERO.  Verified on both of a
+       forked shell's regions: its stack word at bfffde9c goes 000078dc -> 0
+       across the break, and its heap (the parsed command line) goes the same
+       way, which is why sh's child found an empty command list and exited.
+       Both parent and child lose their data; the source page is still intact
+       and still correctly registered in the old vm_object, hashed and all --
+       the kernel simply never issues the copy.  Do it here: on the next
+       translation of this page, if it now resolves somewhere else, the break
+       happened and we copy the bytes across.  8K, the kernel's VM granularity
+       everywhere. */
+    cow_pend_va = va & ~0x1FFFu;
+    cow_pend_pa = pa & ~0x1FFFu;
+    ufault_pending = 1;
+    ufault_va = va;
+    ufault_code = 0;
+    ufault_write = 1;
+    ufault_width = 4;
+    ufault_pc = cpu.pc;
+    cow_faults++;
+    return 1;
+}
+
+/* Finish the copy-on-write break recorded by cow_fault(): the faulting page
+   now resolves to a different physical page, so carry the old contents over. */
+static void cow_settle(u32 va, u32 pa)
+{
+    if (!cow_pend_va || (va & ~0x1FFFu) != cow_pend_va) return;
+    u32 dst = pa & ~0x1FFFu;
+    if (dst != cow_pend_pa) {
+        for (u32 o = 0; o < 0x2000u; o += 4)
+            mem_w32(dst + o, mem_r32(cow_pend_pa + o));
+        cow_copies++;
+        if (verbose_sys && cow_copies < 30)
+            printf("[cow] va %08x broke %08x -> %08x, copied 8K  pc=%08x @%llu\n",
+                   cow_pend_va, cow_pend_pa, dst, cpu.pc,
+                   (unsigned long long)cpu.count);
+    }
+    cow_pend_va = cow_pend_pa = 0;
 }
 
 u32 translate(u32 va, int code)
@@ -228,7 +292,7 @@ u32 translate(u32 va, int code)
         if (peru && kdata_off && va >= UAREA_LO && va < UAREA_HI) {
             u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
             u32 pa;
-            if (!(apr & 1) || !mmu_walk(apr, va, &pa)) return va;
+            if (!(apr & 1) || !mmu_walk(apr, va, &pa, 0)) return va;
             return pa;
         }
         if (va >= 0xE0000000u) return va;
@@ -250,18 +314,24 @@ u32 translate(u32 va, int code)
                 return tlb[code][idx].pa | (va & 0xFFF);
             u32 apr = mem_r32((code ? 0xFFF7F000u : 0xFFF7E000u) + CMMU_SAPR);
             u32 pa;
-            if (!(apr & 1) || !mmu_walk(apr, va, &pa)) {
+            if (!(apr & 1) || !mmu_walk(apr, va, &pa, 0)) {
                 /* The kernel's table does not cover this VA, so we have to guess
                    with the linear map -- and a VA that later BECOMES covered is
                    then read from somewhere else than it was written.  That is
                    the corruption; count it. */
-                if (kfall_n++ < 10)
+                if (kfall_n++ < (verbose_sys ? 200000u : 10u))
                     printf("[kfall] kernel VA %08x not in the kernel's table, "
                            "using linear %08x  pc=%08x @%llu\n",
                            va, lin, cpu.pc, (unsigned long long)cpu.count);
                 return lin;
             }
-            if (pa != lin) kdis_n++;
+            if (pa != lin) {
+                if (verbose_sys && kdis_n < 40)
+                    printf("[kdis] kernel VA %08x: table %08x != linear %08x  "
+                           "pc=%08x @%llu\n", va, pa, lin, cpu.pc,
+                           (unsigned long long)cpu.count);
+                kdis_n++;
+            }
             tlb[code][idx].tag = vpn | 0x80000000u;
             tlb[code][idx].pa  = pa & 0xFFFFF000u;
             return pa;
@@ -279,13 +349,19 @@ u32 translate(u32 va, int code)
 
     u32 vpn = va >> 12;
     u32 idx = vpn & (TLB_SIZE - 1);
-    if (tlb[code][idx].tag == (vpn | 0x80000000u))
-        return tlb[code][idx].pa | (va & 0xFFF);
+    if (tlb[code][idx].tag == (vpn | 0x80000000u)) {
+        /* bit 0 of the cached PA carries the page's write-protect bit; the
+           real PA is page-aligned so it is free.  See cow_fault(). */
+        u32 tpa = (tlb[code][idx].pa & 0xFFFFF000u) | (va & 0xFFF);
+        if ((tlb[code][idx].pa & 1u) && cow_fault(va, tpa)) return 0;
+        if (cow_pend_va) cow_settle(va, tpa);
+        return tpa;
+    }
 
     /* walk_fb: kernel's table, then (realmm) the synthetic direct-map table
        which supplies node-correct physical addresses for kernel memory */
-    u32 pa;
-    if (!walk_fb(apr, va, code, &pa)) {
+    u32 pa, pd = 0;
+    if (!walk_fb(apr, va, code, &pa, &pd)) {
         /* Demand paging for our synthetic user space.  The kernel's VM has no
            idea this address space exists, so a real access fault would find
            no vm_map entry; instead we do what the pager would: hand out a
@@ -300,6 +376,14 @@ u32 translate(u32 va, int code)
            hook delivers a real vector 2 (code) / 3 (data) access fault to the
            kernel instead -- see deliver_fault and the note in run_sys. */
         if (procexp && !ufault_pending) {
+            /* A not-present fault on a needs_copy entry is the OTHER half of a
+               copy-on-write break: the fork unmapped these pages rather than
+               write-protecting them, so there is no old PTE to copy from --
+               ask the kernel's own vm_object for the page instead. */
+            if (hwfault && xlat_write && !code) {
+                u32 src = cow_find_source(va);
+                if (src) { cow_pend_va = va & ~0x1FFFu; cow_pend_pa = src; }
+            }
             ufault_pending = 1;
             ufault_va = va;
             ufault_code = code;
@@ -317,6 +401,8 @@ u32 translate(u32 va, int code)
         return realmm ? cphys(va) : va;
     }
     tlb[code][idx].tag = vpn | 0x80000000u;
-    tlb[code][idx].pa  = pa & 0xFFFFF000u;
+    tlb[code][idx].pa  = (pa & 0xFFFFF000u) | ((pd & PTE_WP) ? 1u : 0u);
+    if ((pd & PTE_WP) && cow_fault(va, pa)) return 0;
+    if (cow_pend_va) cow_settle(va, pa);
     return pa;
 }

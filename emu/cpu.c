@@ -257,6 +257,46 @@ void runq_remove(u32 p)
     mem_w32(translate(p + 4u, 0), 0);
 }
 
+/* The other half of a context switch: put the OUTGOING process back on the run
+   queue, which swtch does at c0056234 before it runs the incoming one.  We
+   abandon proc0 mid-flight to dispatch by hand, and if it is not queued the
+   scheduler has nothing left to pick when our process exits -- it spins in
+   swtch (c0056464-c005649c) instead of resuming proc0 at the parked idle
+   sentinel, so the run never ends.  setrq (c00559c8) wants a runnable proc that
+   is not already on a queue. */
+void runq_add(u32 p)
+{
+    if (!peru || !p) return;
+    if (mem_r32(translate(p + 0x80u, 0))) return;            /* already queued */
+    if (mem_r32(translate(p + 0x40u, 0)) != 3u) return;      /* not SRUN */
+    kcall(0xC00559C8u, p, 0, 0, 0, 0);
+}
+
+/* The pid of whatever is running right now, for tracing.  Under --procexp the
+   kernel owns the process table, so ask it: curproc, then proc+0x4c (a
+   halfword, hence the shift).  Falls back to the synthetic model's pid when
+   that is what is driving (--uprog), and 0 when neither is up yet. */
+int real_pid(void)
+{
+    if (procexp) {
+        u32 cp = mem_r32(translate(peru ? G_CURPROC_G : G_CURPROC, 0));
+        if (cp) return (int)(mem_r32(translate(cp + 0x4Cu, 0)) >> 16);
+        return 0;
+    }
+    return ucur >= 0 ? uprocs[ucur].pid : 0;
+}
+
+/* The pid of the current process's PARENT (proc+0x18 -> its pid), for the
+   per-process descriptor sets: a forked child inherits its parent's. */
+int real_ppid(void)
+{
+    if (!procexp) return 0;
+    u32 cp = mem_r32(translate(peru ? G_CURPROC_G : G_CURPROC, 0));
+    if (!cp) return 0;
+    u32 pp = mem_r32(translate(cp + 0x18u, 0));
+    return pp ? (int)(mem_r32(translate(pp + 0x4Cu, 0)) >> 16) : 0;
+}
+
 void set_curproc(u32 p, u32 ctx)
 {
     if (!peru) { mem_w32(translate(G_CURPROC, 0), p); return; }
@@ -286,7 +326,7 @@ static void dump_words(const char *what, u32 base, u32 n)
 static int kwalk(u32 pmap, u32 va, u32 *pa, u32 *sd_out, u32 *pd_out)
 {
     u32 stva = kr32(pmap), stpa = kr32(pmap + 4);
-    if (mmu_walk(stpa | 1u, va, pa)) {
+    if (mmu_walk(stpa | 1u, va, pa, 0)) {
         if (sd_out) *sd_out = mem_r32(stpa + ((va >> 22) & 0x3FF) * 4);
         if (pd_out) *pd_out = 0;
         return 1;
@@ -353,6 +393,7 @@ int proc_experiment(void)
 
     if (clu) mem_w32(translate(p + 0x90u, 0), clu);   /* forkable cluster */
     procexp_pid = kr32(p + P_PID) >> 16;
+    procexp_proc = p;
     u32 ctx = kr32(p + P_CTX);
     printf("  NEW PROC %08x = proc #%u, pid %u, stat %u, node %u, umap %08x\n",
            p, (p - base) / P_SIZE, kr32(p + P_PID) >> 16, kr32(p + P_STAT),
@@ -528,6 +569,12 @@ int proc_experiment(void)
     u32 upath = sp;
     for (u32 i = 0; i < plen; i++) uput8(pmap, sp + i, (u8)gpath[i]);
 
+    /* ...and a path for the descriptor bootstrap below. */
+    static const char devnull[] = "/dev/null";
+    sp -= sizeof devnull;
+    u32 unull = sp;
+    for (u32 i = 0; i < sizeof devnull; i++) uput8(pmap, sp + i, (u8)devnull[i]);
+
     sp = (sp - (!procexec + nav + 1 + nuenvp + 1) * 4) & ~7u;
     u32 w = sp;
     if (!procexec) { uput32(pmap, w, nav); w += 4; }   /* argc, for crt0 */
@@ -541,6 +588,24 @@ int proc_experiment(void)
     /* execve(path, argv, envp) -- syscall 59, number in r9, args in r2/r3/r4,
        trap 128; the kernel returns to pc+4 on error and pc+8 on success (which
        for a successful exec never happens -- it enters the new image instead). */
+    /* ★ Give the process REAL kernel descriptors 0/1/2 first.  The kernel's
+       exec leaves u_ofile empty, so every descriptor call fails: /bin/sh does
+       dup(2) to stash its input, gets -1, and then happily writes the command's
+       output to fd 11 -- which nothing is listening to, so the shell ran
+       correctly and silently produced nothing.  The emulator answers I/O on
+       fds 0-2 itself (console_syscall) and propagates that through dup/dup2, so
+       what these are attached to hardly matters; they just have to EXIST.  Open
+       /dev/null three times, exactly as the synthetic bootstrap does.
+       open() returns to pc+4 on error and pc+8 on success, so the error slot
+       holds a branch to the success slot and both converge. */
+    u32 boot[] = {
+        0x5C400000u | (unull >> 16), 0x58420000u | (unull & 0xFFFF), /* r2=path */
+        0x58600002u,                       /* or  r3, r0, 2   ; O_RDWR   */
+        0x58800000u,                       /* or  r4, r0, 0   ; mode     */
+        0x59200005u,                       /* or  r9, r0, 5   ; open     */
+        0xF000D080u,                       /* tb0 0, r0, 128             */
+        0xC0000001u,                       /* br .+4 -- error converges  */
+    };
     u32 stub[] = {
         0x5C400000u | (upath  >> 16), 0x58420000u | (upath  & 0xFFFF), /* r2 */
         0x5C600000u | (uargvp >> 16), 0x58630000u | (uargvp & 0xFFFF), /* r3 */
@@ -554,9 +619,14 @@ int proc_experiment(void)
                                               space */
     };
     if (procexec) {
-        for (unsigned i = 0; i < sizeof stub / 4; i++)
-            uput32(pmap, ubase + i * 4, stub[i]);
-        printf("  exec stub at VA 0: execve(\"%s\", argv@%08x, envp@%08x), sp=%08x\n",
+        u32 at = ubase;
+        for (int rep = 0; rep < 3; rep++)          /* fds 0, 1, 2 */
+            for (unsigned i = 0; i < sizeof boot / 4; i++, at += 4)
+                uput32(pmap, at, boot[i]);
+        for (unsigned i = 0; i < sizeof stub / 4; i++, at += 4)
+            uput32(pmap, at, stub[i]);
+        printf("  exec stub at VA 0: 3x open(\"/dev/null\") then "
+               "execve(\"%s\", argv@%08x, envp@%08x), sp=%08x\n",
                gpath, uargvp, uenvpp, sp);
     }
 
@@ -596,6 +666,24 @@ int proc_experiment(void)
     mem_w32(translate(ctx + 0x40, 0), sp);        /* r16 = user sp */
     mem_w32(translate(ctx + 0x80, 0), tramp);     /* resume PC */
     runq_remove(p);                               /* the scheduler's dequeue */
+    /* ★ Take every OTHER runnable process off the run queue.  Once the
+       scheduler really works (--peru) it finally dispatches init, which has sat
+       runnable since boot; init forks a child that spins forever rescanning a
+       directory (196k scans and counting) and starves the program we were
+       actually asked to run.  This harness exists to run ONE program under the
+       kernel, so leave only it and proc0 -- which we re-queue below so there is
+       something to come back to when it exits. */
+    { u32 base = kr32(G_PROCBASE), np = kr32(G_NPROC);
+      /* ...but never the per-CPU IDLE process: swtch panics
+         "unix_switch failed to find any procs / Should have found the idle
+         process (at least)" if the queue empties.  Idle table 0xC1015D18[cpu]. */
+      u32 idle = kr32(0xC1015D18u + kr32(0xC0014008u) * 4u);
+      for (u32 i = 0; base && i < np; i++) {
+          u32 q = base + i * P_SIZE;
+          if (q == p || q == cur || q == idle) continue;
+          if (kr32(q + P_STAT) == 3u) runq_remove(q);
+      } }
+    runq_add(cur);                                /* ...and its enqueue of proc0 */
     set_curproc(p, ctx);                          /* u.u_procp + global curproc */
 
     deliver_traps = 1;
@@ -1129,7 +1217,7 @@ int step(void)
     if (trace_traps && sysmode && pc == 0xC00175C0u && !(cpu.cr[2] & 0x80000000u)) {
         u32 cuapr = mem_r32(0xFFF7F000u + CMMU_UAPR);
         u32 duapr = mem_r32(0xFFF7E000u + CMMU_UAPR);
-        u32 pa1000 = 0; (void)mmu_walk(cuapr, 0x1000u, &pa1000);
+        u32 pa1000 = 0; (void)mmu_walk(cuapr, 0x1000u, &pa1000, 0);
         if (!quiet_uproc)
             printf("[ldctx-rte] PSR=%08x EPSR=%08x SXIP=%08x SNIP=%08x SFIP=%08x\n"
                    "            codeUAPR=%08x dataUAPR=%08x  user0x1000 -> pa=%08x word=%08x\n",
@@ -1172,9 +1260,11 @@ int step(void)
     }
 
     if (watch_pc && pc == watch_pc) {
+        /* r9 is worth its place: it is the syscall number in nX's ABI, so
+           --watch on the dispatcher (c00ab278) names the call. */
         printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
-               "| r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
-               pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6),
+               "r9=%08x | r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
+               pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6), RD(9),
                RD(23), RD(24), RD(25), RD(26), RD(27),
                (unsigned long long)cpu.count);
     }
@@ -1330,6 +1420,21 @@ int step(void)
                via rte, and interrupt entry invalidates SXIP so the real resume
                point is SNIP.  Process launch / fault return set SNIP valid. */
             cpu.cr[1] = cpu.cr[2];       /* restore PSR from EPSR */
+            /* ★ Returning to USER mode: drop the cached translations.  Our TLB
+               has no address-space tag, and the kernel changes a process's
+               mappings while it is in the kernel -- exec is the sharp case: it
+               replaces the image but reuses the pmap, so no APR write flushes
+               us, and the CMMU invalidations it does issue we do not model at
+               single-page granularity.  A forked shell's child then re-entered
+               user mode still fetching the OLD image through stale entries: it
+               ran /bin/sh's crt0 after exec'ing /bin/echo, branched to sh's
+               main, and died on a null store ("Memory fault - core dumped").
+               Flush on every exception return, the same conservative policy
+               cmmu_command already applies to invalidate commands: correctness
+               first, and the TLB refills immediately.  Returning to user alone
+               is NOT enough -- the kernel reaches user memory itself through
+               copyin/copyout while still in supervisor mode. */
+            tlb_flush();
             u32 r = (cpu.cr[4] & 2u) ? cpu.cr[4]
                   : (cpu.cr[5] & 2u) ? cpu.cr[5]
                                      : cpu.cr[6];

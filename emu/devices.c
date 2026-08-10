@@ -10,7 +10,12 @@ void memop(u32 sub, u32 D, u32 ea)
        translates before touching memory. */
     if (sub >= 0x0C && sub <= 0x0F) { WR(D, ea); return; }
     if (wmem_hi || stwatch_active) wmem_tick(sub, D, ea);      /* --wmem: watch a VIRTUAL range */
+    /* Tell translate() whether this access is a store, so it can enforce the
+       page's write-protect bit (copy-on-write).  0x08-0x0B are the stores,
+       0x00/0x01 are xmem -- a read-modify-write, so also a write. */
+    xlat_write = (sub >= 0x08 && sub <= 0x0B) || sub <= 0x01;
     ea = translate(ea, 0);
+    xlat_write = 0;
     /* Page fault: abort before any memory or register is touched, so the
        instruction can simply be re-executed once the page is there.  Record
        whether it was a store: --hwfault has to tell the kernel's vm_fault
