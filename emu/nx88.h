@@ -155,6 +155,7 @@ extern u64 cmram_reads, cmram_writes;
 extern u8 **cmram_pages;
 extern u32 watch_pc;
 extern u64 wtrace_n, wtrace_left, wtrace_at;
+extern int disk_wrote, fs_synced;
 extern int dump_pchist;
 extern int vmprobe;
 extern int vmexp;

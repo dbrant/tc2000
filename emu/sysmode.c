@@ -192,6 +192,28 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 }
                 printf("[procexp] scheduler made no progress -- deadlock?\n");
             }
+            /* ★ WARN ABOUT UNFLUSHED DISK WRITES.  This harness ends the
+               moment our process tree exits -- there is no shutdown, so the
+               kernel's buffer cache can still hold dirty FFS metadata
+               (cylinder-group block and inode bitmaps, the superblock summary,
+               inodes).  Those never reach disk.img, and the NEXT run mounts a
+               filesystem whose bitmaps say "free" for blocks and inodes the
+               directory tree is really using.  The next allocation collides:
+               `ialloc: dup alloc' or `free: freeing free block' -- a panic in a
+               later run caused by writes silently lost in an earlier one.
+
+               We cannot flush it ourselves: sync() has to sleep waiting for its
+               I/O, and calling it from here (proc0 parked on the idle sentinel,
+               which never yields to the scheduler) just runs away -- measured,
+               30M instructions and no return.  It has to run as a real process,
+               so the guest has to ask for it.  Say so loudly instead. */
+            if (disk_wrote && !fs_synced)
+                printf("[disk] ★ WARNING: disk.img was written through the "
+                       "buffer cache but the guest never ran sync or umount, so "
+                       "dirty\n       filesystem metadata did NOT reach the "
+                       "image.  A LATER run will panic `ialloc: dup alloc' or\n"
+                       "       `free: freeing free block'.  End the script with "
+                       "`/etc/umount /mnt' (or `sync').\n");
             if (interactive)
                 printf("\n[halt] shell exited -- machine halted.\n");
             else
@@ -335,6 +357,10 @@ int run_sys(const char *path, u64 limit, u32 sig)
                    of the fd-aware intercepts look at them. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u))
                     fd_switch(real_pid(), real_ppid());
+                /* nX sysent: 34 = sync, 159 = unmount (both flush the cache) */
+                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
+                    && (RD(9) == 34 || RD(9) == 159))
+                    fs_synced = 1;
                 if (trace_traps)
                     printf("[trap] pid %d vec %u pc=%08x  syscall r9=%-4u "
                            "args %08x %08x %08x @%llu\n",

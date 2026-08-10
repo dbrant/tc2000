@@ -109,6 +109,7 @@ void ctx_report(void)
    without having to guess the address first. */
 static u64 wmem_n;
 u64 wtrace_n, wtrace_left, wtrace_at;
+int disk_wrote, fs_synced;
 void pwatch_hit(u32 a, u8 v)
 {
     static unsigned n;
@@ -1097,7 +1098,7 @@ int step(void)
                         tmp[k]=w>>24; tmp[k+1]=w>>16; tmp[k+2]=w>>8; tmp[k+3]=w;
                     }
                     if (fseek(dev, (long)blkno * 512, SEEK_SET) == 0)
-                        fwrite(tmp, 1, bcount, dev), fflush(dev);
+                        fwrite(tmp, 1, bcount, dev), fflush(dev), disk_wrote = 1;
                 }
             }
             if (scsi_trace)
@@ -1160,7 +1161,7 @@ int step(void)
                         tmp[k]=w>>24; tmp[k+1]=w>>16; tmp[k+2]=w>>8; tmp[k+3]=w;
                     }
                     if (fseek(dev, (long)blkno * 512, SEEK_SET) == 0)
-                        fwrite(tmp, 1, bcount, dev), fflush(dev);
+                        fwrite(tmp, 1, bcount, dev), fflush(dev), disk_wrote = 1;
                 }
                 if (scsi_trace)
                     printf("[bio-%s] %s blk=%u bcount=%u addr=%08x\n",
