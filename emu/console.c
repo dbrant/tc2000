@@ -25,6 +25,7 @@
   #define CON_BADSOCK   INVALID_SOCKET
   #define con_closesock closesocket
 #else
+  #include <termios.h>
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <netinet/tcp.h>
@@ -224,6 +225,94 @@ static void con_write(const u8 *p, size_t n, int is_err)
 
 void con_write_str(const char *s) { con_write((const u8 *)s, strlen(s), 0); }
 
+
+/* ---------------------------------------------------------------------------
+   ★ TTY MODES -- what makes the curses games playable.
+
+   The console used to answer every tty ioctl with a bare "success" and read
+   input a COOKED LINE at a time.  That is enough for a shell, and it is why
+   /usr/games/snake printed "Terminal must have addressible cursor" and then,
+   once TERM was right, sat waiting for a newline that a game never sends.
+
+   4.3BSD terminal control is sgtty, not termios.  The games do exactly this:
+     TIOCGETP (0x40067408) save the current sgttyb
+     TIOCGETC (0x40067474) save the current tchars
+     TIOCSETP (0x80067409) set CBREAK and clear ECHO
+     TIOCSETC (0x80067475) install their own interrupt/quit characters
+   struct sgttyb is 6 bytes { char ispeed, ospeed, erase, kill; short flags }
+   and struct tchars is 6 { intr, quit, start, stop, eof, brk }.  sg_flags:
+   CBREAK 0x02, ECHO 0x08, CRMOD 0x10, RAW 0x20.
+
+   When the guest asks for CBREAK or RAW we have to stop cooking lines AND put
+   the real terminal on the other side into the same mode, or the host tty goes
+   on buffering until Enter and echoing every keystroke into the game's screen.
+   --------------------------------------------------------------------------- */
+#define SG_CBREAK 0x02u
+#define SG_ECHO   0x08u
+#define SG_RAW    0x20u
+
+static u8 tty_sg[6] = { 13, 13, 0x7f, 0x15, 0x00, SG_ECHO | 0x10 }; /* 9600,DEL,^U */
+static u8 tty_tc[6] = { 0x03, 0x1c, 0x11, 0x13, 0x04, 0xff };
+static u32 tty_flags(void) { return ((u32)tty_sg[4] << 8) | tty_sg[5]; }
+static int tty_is_raw(void) { return (tty_flags() & (SG_CBREAK | SG_RAW)) != 0; }
+
+#ifndef _WIN32
+static struct termios host_tio_save;
+static int host_tio_valid, host_tio_raw;
+static void host_tty_restore(void)
+{
+    if (host_tio_valid && host_tio_raw) {
+        tcsetattr(0, TCSANOW, &host_tio_save);
+        host_tio_raw = 0;
+    }
+}
+#endif
+
+/* Mirror the guest's cooked/raw choice onto the host terminal.  Only for the
+   stdio console: the socket console already negotiated character-at-a-time
+   telnet when the client connected, so it needs nothing here. */
+static void host_tty_mode(int raw)
+{
+#ifndef _WIN32
+    if (con_use_sock || !isatty(0)) return;
+    if (raw == host_tio_raw) return;
+    if (!host_tio_valid) {
+        if (tcgetattr(0, &host_tio_save) != 0) return;
+        host_tio_valid = 1;
+        atexit(host_tty_restore);
+    }
+    if (raw) {
+        struct termios t = host_tio_save;
+        t.c_lflag &= ~(ICANON | ECHO);
+        t.c_cc[VMIN]  = 1;
+        t.c_cc[VTIME] = 0;
+        if (tcsetattr(0, TCSANOW, &t) == 0) host_tio_raw = 1;
+    } else {
+        tcsetattr(0, TCSANOW, &host_tio_save);
+        host_tio_raw = 0;
+    }
+#else
+    (void)raw;      /* no termios; a Windows console needs its own handling */
+#endif
+}
+
+/* One byte, no line editing and no echo -- the read a game in CBREAK expects. */
+static u32 con_read_raw(u8 *dst, u32 max)
+{
+    con_ensure_client();
+    if (!max) return 0;
+    if (con_use_sock) {
+        int b = con_in_byte();
+        if (b < 0) return 0;
+        dst[0] = (u8)b;
+        return 1;
+    }
+    int c = fgetc(stdin);
+    if (c == EOF) return 0;
+    dst[0] = (u8)c;
+    return 1;
+}
+
 static u32 con_read_line(u8 *dst, u32 max)
 {
     con_ensure_client();
@@ -410,7 +499,9 @@ int console_syscall(u32 sysno, u32 tpc)
         if (!fd_is_console(a0)) return 0;
         u32 n = a2 > 4096 ? 4096 : a2;
         u8 tmp[4096];
-        u32 got = n ? con_read_line(tmp, n) : 0;        /* one cooked line   */
+        u32 got = !n ? 0
+                : tty_is_raw() ? con_read_raw(tmp, n)   /* a game: one key    */
+                               : con_read_line(tmp, n); /* a shell: one line  */
         got = uwrite_mem(a1, tmp, got);
         con_in_bytes += got;
         ret = (long)got;
@@ -418,7 +509,28 @@ int console_syscall(u32 sysno, u32 tpc)
     }
     case 54:                                         /* ioctl(fd, ...)    */
         if (!fd_is_console(a0)) return 0;
-        ret = 0;                                       /* yes, it's a tty   */
+        switch (a1) {
+        case 0x40067408:                               /* TIOCGETP sgttyb   */
+            if (ubuf_fault(a2, 6, 1, tpc)) return 1;
+            uwrite_mem(a2, tty_sg, 6);
+            break;
+        case 0x80067409:                               /* TIOCSETP          */
+        case 0x8006740Au:                              /* TIOCSETN          */
+            if (ubuf_fault(a2, 6, 0, tpc)) return 1;
+            for (u32 i = 0; i < 6; i++) tty_sg[i] = mem_r8(translate(a2 + i, 0));
+            host_tty_mode(tty_is_raw());
+            break;
+        case 0x40067474:                               /* TIOCGETC tchars   */
+            if (ubuf_fault(a2, 6, 1, tpc)) return 1;
+            uwrite_mem(a2, tty_tc, 6);
+            break;
+        case 0x80067475:                               /* TIOCSETC          */
+            if (ubuf_fault(a2, 6, 0, tpc)) return 1;
+            for (u32 i = 0; i < 6; i++) tty_tc[i] = mem_r8(translate(a2 + i, 0));
+            break;
+        default: break;                                /* yes, it's a tty   */
+        }
+        ret = 0;
         break;
     default:
         return 0;

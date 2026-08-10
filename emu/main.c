@@ -205,7 +205,12 @@ int main(int argc, char **argv)
             if (!nuenvp) {
                 uenvp[nuenvp++] = "PATH=/bin:/etc:/usr/bin";
                 uenvp[nuenvp++] = "HOME=/";
-                uenvp[nuenvp++] = "TERM=dumb";
+                /* vt100, not dumb: the socket console IS a VT100 and the
+                   stdio one is whatever the user is sitting at.  With
+                   TERM=dumb the curses games refuse to start ("Terminal
+                   must have addressible cursor"), and /etc/termcap on the
+                   tape has a full vt100 entry. */
+                uenvp[nuenvp++] = "TERM=vt100";
                 uenvp[nuenvp++] = "SHELL=/bin/sh";
             }
         }
