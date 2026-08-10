@@ -5,6 +5,14 @@
 
 int main(int argc, char **argv)
 {
+    /* Line-buffer stdout.  Every diagnostic here (--trace-traps, --wmem,
+       --pwatch, panic reports) goes to stdout, and when the run is redirected
+       to a file stdio switches to BLOCK buffering -- so a run that ends by
+       being killed, or that stops mid-investigation, loses the last and most
+       interesting few kilobytes.  Two separate debugging sessions have been
+       sent down the wrong path by exactly that. */
+    setvbuf(stdout, 0, _IOLBF, 0);
+
     pages = calloc(NPAGES, sizeof *pages);
     cmram_pages = calloc(NPAGES, sizeof *cmram_pages);
     if (!pages) { fprintf(stderr, "out of memory\n"); return 1; }

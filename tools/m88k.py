@@ -195,9 +195,14 @@ def decode(word, addr=0):
         fop = (word >> 11) & 0x1F
         if fop not in FPU:
             return None
-        td = PREC.get((word >> 9) & 3, "?")
+        # Operand-size fields.  TD is the LOW pair (bits 6-5) and T2 the high
+        # one (10-9) -- not the other way round.  With them swapped this
+        # printed `flt.sd` for what is really `flt.ds` (int->double) and
+        # `fcmp.dds` for a compare of two doubles, which sent one debugging
+        # session a long way down the wrong path.
+        td = PREC.get((word >> 5) & 3, "?")
         t1 = PREC.get((word >> 7) & 3, "?")
-        t2 = PREC.get((word >> 5) & 3, "?")
+        t2 = PREC.get((word >> 9) & 3, "?")
         S2 = word & 0x1F
         if fop in FPU_UNARY:
             return Insn(addr, word, "%s.%s%s" % (FPU[fop], td, t2),

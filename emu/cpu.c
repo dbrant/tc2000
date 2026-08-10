@@ -1320,7 +1320,16 @@ int step(void)
         }
     } else if (op == 0x21) {                                          /* FPU */
         u32 fop = (w >> 11) & 0x1F;
-        int td = (w >> 9) & 3, t1 = (w >> 7) & 3, t2 = (w >> 5) & 3;
+        /* ★ Operand-size fields, and they are NOT in the order you would
+           guess: TD is the LOW pair (bits 6-5) and T2 the high one (10-9).
+           With them the other way round the emulator contradicted itself --
+           `flt` wrote r24 as a single while `fsub.ddd` two instructions later
+           read the same register as a double.  Decoded correctly, snake's
+           `flt` is int->double and its `fcmp` compares two doubles, which is
+           what the register contents actually hold.  (tools/m88k.py has the
+           same swap, so disassembly prints `flt.sd` for what is really
+           `flt.ds` -- do not take those suffixes as evidence.) */
+        int td = (w >> 5) & 3, t1 = (w >> 7) & 3, t2 = (w >> 9) & 3;
         u32 S2 = w & 31;
         switch (fop) {
         case 0x05: fp_write(D, td, fp_read(S1,t1) + fp_read(S2,t2)); break; /* fadd */
@@ -1336,15 +1345,29 @@ int step(void)
         case 0x0B:                                               /* trnc (toward 0) */
             WR(D, (u32)(s32)trunc(fp_read(S2,t2))); break;
         case 0x07: {                                             /* fcmp */
+            /* ★ The condition bits sit at the SAME positions as the integer
+               cmp (C_EQ=2 .. C_GE=7); only bits 0 and 1 differ -- nc (the
+               operands are not comparable, i.e. a NaN) and cp (they are).
+               This used to write eq/ne/gt/le/lt/ge one bit LOW, so every
+               floating-point branch tested its neighbour: code doing `bb1 4`
+               for GT read our LE instead.  /usr/games/snake picks the chaser's
+               direction with `fcmp.dds; bb1 4` over a weight table, so with
+               weight 0 the test was always true, it always chose direction 0,
+               marched the snake in a straight line off the board and then did
+               rand() %% 0 -- surfacing as "Illegal instruction - core dumped"
+               several seconds later. */
             double x = fp_read(S1,t1), y = fp_read(S2,t2);
             u32 r = 0;
-            if (!(x < y || x > y || x == y)) r |= 0x1;   /* un: unordered */
-            if (x == y) r |= 0x2;                        /* eq */
-            if (x != y) r |= 0x4;                        /* ne */
-            if (x > y)  r |= 0x8;                        /* gt */
-            if (x <= y) r |= 0x10;                       /* le */
-            if (x < y)  r |= 0x20;                       /* lt */
-            if (x >= y) r |= 0x40;                        /* ge */
+            if (!(x < y || x > y || x == y)) {
+                r |= 1u << 0;                            /* nc: unordered */
+            } else {
+                r |= 1u << 1;                            /* cp: comparable */
+                r |= (x == y) ? (1u << C_EQ) : (1u << C_NE);
+                if (x >  y) r |= 1u << C_GT;
+                if (x <= y) r |= 1u << C_LE;
+                if (x <  y) r |= 1u << C_LT;
+                if (x >= y) r |= 1u << C_GE;
+            }
             WR(D, r); break;
         }
         default: goto badinsn;
