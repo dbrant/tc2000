@@ -463,6 +463,8 @@ int run_sys(const char *path, u64 limit, u32 sig)
         }
     if (vmprobe) vm_probe_report();
     if (ctxtrace) ctx_report();
+    if (clock_irq) printf("clock interrupts delivered: %llu (softint re-asserts %llu)\n",
+                          (unsigned long long)clock_ticks, (unsigned long long)softint_ticks);
     if (ufaults) printf("user page faults resolved through the kernel's VM: %llu\n",
                         (unsigned long long)ufaults);
     if (ktab_bias) printf("user-space walks through the kernel's real tables: %llu\n",

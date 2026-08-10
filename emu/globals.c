@@ -28,6 +28,30 @@ u32   trap_pc;
 /* forward decls so memop can service the free-running timer at all widths */
 int  sysmode;
 u32  tick_scale = 2000;
+/* ★ The hardclock is a DEADLINE COMPARATOR, not a periodic tick.  Each time it
+   fires, the ISR reads the free-running counter at 0xE07E8018, adds 0x2710
+   (10000) and writes the sum to the compare register at 0xE07E0004
+   (c00495e0-c00495ec); the hardware is meant to interrupt when the counter
+   reaches that value.  0xE07E0000 is the timer's interrupt enable (_enable
+   writes 1/0 there).  Modelling those three registers is what makes the
+   kernel's own idea of elapsed time line up with the interrupts it receives.
+   ★ We do NOT trigger off that deadline, and the reason is worth recording:
+   the same counter drives the kernel's `delay(ms)` busy-loop (c00a2690, which
+   multiplies its argument by 1000 -- so the counter is in MICROSECONDS).  The
+   emulator deliberately runs it fast (tick_scale 2000, i.e. 1 us per 1/2000
+   instruction) so those delays finish instantly.  At that rate a 10000 us
+   hardclock interval is FIVE instructions, which is an interrupt storm; but
+   slowing the counter to something realistic makes delay(1000) take 20M
+   instructions and the boot never finishes.  So the deadline is recorded but
+   the tick stays paced by clock_period instructions. */
+u32  clock_div = 10;
+u32  clock_deadline;
+/* Armed from reset: the compare register powers up at 0 and the free-running
+   counter is already past it, so the first interrupt is due immediately.  The
+   kernel never programs a deadline before the first tick -- it programs the
+   NEXT one from inside the ISR -- so without this nothing ever starts and the
+   boot spins in its clock-calibration loop at c00a26c4. */
+int  clock_armed = 1, clock_enabled;
 /* Completion status the SHA reports at base+0x73c after a queue-mode command.
    shareset does `bb0 5, status` and complains "start queue_mode: funny status
    0x%x" unless bit 5 is set -- which is why the old value of 1 produced exactly

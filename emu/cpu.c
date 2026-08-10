@@ -108,7 +108,8 @@ void ctx_report(void)
    makes" (--stwatch=PC), which answers "where does this routine actually write?"
    without having to guess the address first. */
 static u64 wmem_n;
-u64 wtrace_n, wtrace_left, wtrace_at;
+u64 wtrace_n, wtrace_left, wtrace_at, clock_ticks, softint_ticks, next_softint;
+int in_kcall;
 int disk_wrote, fs_synced;
 void pwatch_hit(u32 a, u8 v)
 {
@@ -167,6 +168,15 @@ void regfind_tick(u32 pc)
 #define KCALL_RET 0x00DEAD00u
 u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
 {
+    /* ★ No interrupts inside a kcall.  This is the emulator impersonating a
+       call into the kernel from the idle sentinel -- a context that is not a
+       real thread and cannot be preempted safely.  Let a clock tick land in
+       the middle and the callee blocks on a lock nobody will release: measured,
+       kcall(setrq) ran away at c00181a8 (the spin-delay feeding the xmem
+       spinlock at c0017018) and the machine was dead.  That was the last thing
+       standing between --clock and a working sleep(). */
+    int save_kc = in_kcall;
+    in_kcall = 1;
     CPU save = cpu;
     WR(1, KCALL_RET);
     WR(2, a2); WR(3, a3); WR(4, a4); WR(5, a5); WR(6, a6);
@@ -176,6 +186,7 @@ u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
     int trapped = 0;
     while (cpu.pc != KCALL_RET && guard++ < 30000000ull)
         if (step()) { trapped = 1; break; }
+    in_kcall = save_kc;
     u32 ret = RD(2);
     int returned = (cpu.pc == KCALL_RET);
     u32 tv = trap_vector, tp = dbg_pc;
@@ -807,6 +818,15 @@ void deliver_exception(u32 vector)
        SXIP is INVALID (V=bit1 clear) and the resume point is SNIP.  Marking
        SXIP invalid is what lets the kernel's saveregs (which nulls SNIP and
        points SFIP at _hardclock_interface) fall through to SFIP on its rte. */
+    /* ★ No data transaction is outstanding at an instruction boundary, so the
+       data pipeline registers must read EMPTY.  Leaving the DMT0 valid bit set
+       from an earlier access fault makes the kernel's exreturn (c00aa3d4) --
+       which runs for every exception, interrupts included -- believe it has a
+       faulted data access to resolve, re-resolve one that already completed,
+       and eventually give up with SIGSEGV.  Measured: without this, enabling
+       --clock produced 150,522 trapsignal(SIGSEGV) calls from c00aa9a4 and the
+       process never finished. */
+    cpu.cr[8] = cpu.cr[11] = cpu.cr[14] = 0;   /* DMT0/1/2: no transaction    */
     cpu.cr[4] = cpu.pc;                      /* SXIP = pc, invalid (V=0)       */
     cpu.cr[5] = cpu.pc | 2u;                /* SNIP = resume pc, valid        */
     cpu.cr[6] = (cpu.pc + 4u) | 2u;         /* SFIP valid                     */
@@ -1215,12 +1235,72 @@ int step(void)
                    cuapr, duapr, pa1000, pa1000 ? mem_r32(pa1000) : 0);
     }
 
-    /* Deliver a periodic hardclock interrupt once the kernel has enabled
-       interrupts (PSR IND clear) and we are at an instruction boundary. */
+    /* Deliver a periodic hardclock interrupt -- but only when the kernel has
+       actually unmasked it.
+
+       PSR bit 1 (IND) is the GLOBAL disable, and gating on that alone was
+       wrong: nX also masks PER SOURCE through the node interrupt controller.
+       Its spl functions (all of which tail into c009f008) keep a level in a
+       global at 0xC0014064, then _enable (c009bdd4) turns that level into a
+       bitmask and writes it to the hardware register at **0xE0780014**.  That
+       register is the real gate, and its bits are the sources that are
+       ENABLED -- measured 0xff at spl 0 (everything on) and 0x00 at spl 0x1e
+       (everything off), so the mask must be TESTED, not compared to zero.
+
+       Without this the emulator fired interrupts straight into critical
+       sections: --clock booted fine but the moment a real process ran, the ISR
+       queued behind the very lock the interrupted section held and the machine
+       spun forever at c00181a8 (a spin-delay feeding an xmem spinlock acquire).
+
+       Also never inject an async interrupt while a synchronous fault is
+       pending: the fault has to win, or it is lost and re-taken forever. */
+    /* ★ SOFTWARE INTERRUPTS ARE LEVEL-TRIGGERED.  The kernel requests one by
+       setting a bit in the pending mask at 0xC00140CC (setsoftint, c00a7fd0);
+       the ISR then dispatches every pending bit ABOVE the spl it interrupted
+       (c00160a4-c00160c0: `dispatch = pending & ~((2 << spl) - 1)`) and stores
+       the rest back.  On real hardware the controller keeps the line asserted,
+       so as soon as the kernel lowers spl the interrupt is taken again and the
+       remaining bits run.
+
+       We only ever delivered on the periodic clock schedule, and those ticks
+       always landed at an spl high enough to mask the low sources out -- so
+       softclock (source 2) was requested over and over and NEVER dispatched.
+       That is why callouts never fired and sleep()/SIGALRM never worked:
+       measured, pending sat at 0x4004 (bits 2 and 14) with only bit 27, the
+       hardclock, ever reaching a handler.
+
+       Two guards keep this from drowning the machine in its own ISR.  The spl
+       mask above is the real one -- the ISR raises spl to 0x1b almost
+       immediately, so `open` excludes the low sources while it is running --
+       and the re-assert is rate-limited to the tick, because a pending bit
+       stays set until its handler runs.  (Gating on user mode instead does NOT
+       work: when every process is asleep in sigpause, which is exactly when
+       the timer must fire, nothing is in user mode at all.) */
     if (clock_irq && sysmode && !cpu.has_pending && !(cpu.cr[1] & 2u)
-        && cpu.cr[7] >= 0xC0000000u && cpu.count >= next_clock) {
+        && cpu.cr[7] >= 0xC0000000u && !ufault_pending && !in_kcall
+        && (mem_r32(IRQ_MASK_REG) & IRQ_HARDCLOCK)) {
+        u32 spl  = mem_r32(translate(SPL_LEVEL, 0));
+        u32 pend = mem_r32(translate(SOFTINT_PENDING, 0));
+        u32 open = (spl >= 31) ? 0u : ~((2u << spl) - 1u);
+        /* Rate-limited to the tick: a pending bit stays set until its handler
+           runs, so re-asserting on every user-mode instruction just starves the
+           machine in its own ISR. */
+        if ((pend & open) && cpu.count >= next_softint) {
+            next_softint = cpu.count + clock_period;
+            softint_ticks++;
+            deliver_exception(1);
+            return 0;
+        }
+    }
+
+    if (clock_irq && sysmode && !cpu.has_pending && !(cpu.cr[1] & 2u)
+        && cpu.cr[7] >= 0xC0000000u
+        && cpu.count >= next_clock
+        && (mem_r32(IRQ_MASK_REG) & IRQ_HARDCLOCK)
+        && !ufault_pending && !in_kcall) {
         next_clock = cpu.count + clock_period;
-        irq_source = 0x40;                  /* hardclock (bit 27) */
+        clock_ticks++;
+        irq_source = 0x40;
         deliver_exception(1);               /* interrupt vector */
         return 0;
     }
@@ -1262,9 +1342,9 @@ int step(void)
         /* r9 is worth its place: it is the syscall number in nX's ABI, so
            --watch on the dispatcher (c00ab278) names the call. */
         printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
-               "r9=%08x | r17=%08x r18=%08x r19=%08x r21=%08x r22=%08x "
+               "r7=%08x r8=%08x r9=%08x | r17=%08x r18=%08x r19=%08x r21=%08x r22=%08x "
                "r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
-               pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6), RD(9),
+               pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6), RD(7), RD(8), RD(9),
                RD(17), RD(18), RD(19), RD(21), RD(22),
                RD(23), RD(24), RD(25), RD(26), RD(27),
                (unsigned long long)cpu.count);

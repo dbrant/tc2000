@@ -43,7 +43,12 @@ typedef uint64_t u64;
 /* ------------------------------------------------------------- constants */
 #define PAGE_SIZE 4096
 #define NPAGES    (1u << 20)          /* 4 GiB of address space, sparse */
+#define IRQ_MASK_REG   0xE0780014u  /* _enable (c009bdd4) writes the
+                                       per-level interrupt mask here */
+#define SOFTINT_PENDING 0xC00140CCu /* pending software-interrupt mask */
+#define IRQ_HARDCLOCK  0x40u        /* hardclock's bit in both regs   */
 #define IRQ_SOURCE_REG 0xE0780018u
+#define SPL_LEVEL      0xC0014064u  /* current interrupt priority level */
 #define SHA_BASE   0xFC008800u
 #define SHA_STATUS 0xFC008800u
 #define SHA_CMD    0xFC008802u
@@ -143,6 +148,13 @@ extern u32 trap_vector;
 extern u32 trap_pc;
 extern int sysmode;
 extern u32 tick_scale ;
+extern u32 clock_div, clock_deadline;
+extern int clock_irq;
+extern int clock_armed, clock_enabled;
+#define TIMER_CMP_REG 0xE07E0004u   /* hardclock deadline compare */
+#define TIMER_ENA_REG 0xE07E0000u   /* hardclock interrupt enable */
+static inline u32 timer_now(void)
+{ return (u32)(cpu.count * tick_scale); }
 extern u32 sha_done_status ;
 extern u32 sha_desc_clear ;
 extern const u8 memop_scale[] ;
@@ -154,7 +166,8 @@ extern u32 cmram_sel;
 extern u64 cmram_reads, cmram_writes;
 extern u8 **cmram_pages;
 extern u32 watch_pc;
-extern u64 wtrace_n, wtrace_left, wtrace_at;
+extern u64 wtrace_n, wtrace_left, wtrace_at, clock_ticks, softint_ticks, next_softint;
+extern int in_kcall;
 extern int disk_wrote, fs_synced;
 extern int dump_pchist;
 extern int vmprobe;

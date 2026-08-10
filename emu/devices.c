@@ -65,7 +65,7 @@ void memop(u32 sub, u32 D, u32 ea)
     /* The free-running timer at 0xE07E8018 must respond to sub-word reads too:
        _startclock_duart polls it with ld.h and spins until it changes. */
     if (sysmode && (ea & ~3u) == TIMER_ADDR) {
-        u32 t = (u32)(cpu.count * tick_scale);   /* 32-bit big-endian counter */
+        u32 t = timer_now();                     /* 32-bit big-endian counter */
         u32 off = ea & 3;
         switch (sub) {
         case 0x05: WR(D, t); return;
@@ -108,7 +108,7 @@ u32 cmmu_id_for(u32 a)
 u32 dev_read32(u32 a)
 {
     if (sysmode) {
-        if (a == TIMER_ADDR) return (u32)(cpu.count * tick_scale);
+        if (a == TIMER_ADDR) return timer_now();
         if (is_cmmu_id(a))   return cmmu_id_for(a);
         if (a == CMRAM_DATA) { cmram_reads++; return cmram_r32(cmram_sel & ~3u); }
         if (a == IRQ_SOURCE_REG) return irq_source;   /* pending interrupt src */
@@ -144,6 +144,9 @@ void dev_write32(u32 a, u32 v)
         if (a == CMRAM_SELECT) { cmram_sel = v; return; }
         if (a == CMRAM_DATA) { cmram_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
         if (a == IRQ_SOURCE_REG) { irq_source = v; return; } /* ack clears src */
+        /* hardclock deadline / enable -- see the note by clock_div */
+        if (a == TIMER_CMP_REG) { clock_deadline = v; clock_armed = 1; }
+        if (a == TIMER_ENA_REG) clock_enabled = (v != 0);
     }
     mem_w32(a, v);
     if (sysmode) {
