@@ -53,6 +53,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
         else if (!strcmp(argv[i], "--hwfault"))    hwfault = 1;
         else if (!strcmp(argv[i], "--peru"))       peru = 1;
+        else if (!strcmp(argv[i], "--no-hwfault")) no_hwfault = 1;
+        else if (!strcmp(argv[i], "--no-peru"))    no_peru = 1;
         else if (!strcmp(argv[i], "--procexec"))   { procexp = 1; procexec = 1; }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
@@ -82,10 +84,24 @@ int main(int argc, char **argv)
        on another node's run queue, which no CPU here executes, and the emulator
        has to stand in for the missing processors.  One node keeps forks local
        AND boots 15x faster (3.7M instructions instead of 55M).  An explicit
-       --nodes=N still wins. */
+       --nodes=N still wins.
+
+       It also implies --hwfault and --peru, which are a MATCHED PAIR and are
+       what make the kernel's real process path actually work:
+         --hwfault  delivers real MC88100 access faults, the only route that
+                    can break copy-on-write;
+         --peru     gives each process its own u-area, without which curproc
+                    still names the parent after a fork and the first sleep
+                    panics.
+       Neither alone is enough -- with only --peru a forked shell dies on
+       "cannot page in 00000000 (code)", with only --hwfault on the old
+       sleep_and_unlock panic.  Together /bin/sh runs a script.  --no-hwfault
+       and --no-peru put either back the old way for A/B comparison. */
     if (procexec) {
         dataphys = 1;
         if (!cfg_nodes) cfg_nodes = 1;
+        hwfault = !no_hwfault;
+        peru    = !no_peru;
     }
     if (nwords) path = words[0];
     if (!path) {
@@ -104,6 +120,13 @@ int main(int argc, char **argv)
                 "               load binaries from the SCSI disk's own FFS\n"
                 "  --console-port=N  serve the interactive console on 127.0.0.1:N\n"
                 "               (VT100/telnet); the kernel log stays on stdout\n"
+                "  --procexec --uprog=PATH  run PATH as a REAL nX process: the\n"
+                "               kernel's own execve, fork, copy-on-write and\n"
+                "               scheduler.  Implies --dataphys, --nodes=1 and\n"
+                "               --hwfault/--peru (real MC88100 access faults and\n"
+                "               per-process u-areas -- a matched pair; neither\n"
+                "               alone is enough).  --no-hwfault / --no-peru opt\n"
+                "               back out for A/B comparison.\n"
                 "  sys mode defaults to the real-memory model with EEPROM signature\n"
                 "  'A'; pass --identity for the superseded identity path.\n");
         return 2;

@@ -86,6 +86,7 @@ int  dataphys;         /* --dataphys: load kernel data at the PA nX expects */
 u32  kdata_va, kdata_off;  /* start VA and VA-PA offset of that region */
 int  hwfault;          /* --hwfault: deliver real MC88100 access faults */
 int  peru;             /* --peru: per-process u-areas (see mmu.c/translate) */
+int  no_hwfault, no_peru;   /* --no-hwfault / --no-peru: opt back out */
 int  ufault_pending;   /* a real process faulted; run_sys pages it in and retries */
 u32  ufault_va, ufault_pc;
 int  ufault_code;

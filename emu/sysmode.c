@@ -163,6 +163,60 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 if (a != procexp_proc) continue;
                 if (pid >= pickpid) { pickpid = pid; pick = q; }
             }
+            /* Anything of ours still in play -- running, runnable or asleep --
+               but not a zombie (nobody reaps ours; proc0 is their parent). */
+            int alive = 0;
+            for (u32 i = 0; pb && i < np && !alive; i++) {
+                u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
+                if (st == 0 || st == 5) continue;
+                u32 a2 = q;
+                for (int hop = 0; a2 && a2 != procexp_proc && hop < 32; hop++)
+                    a2 = mem_r32(translate(a2 + 0x18u, 0));
+                if (a2 == procexp_proc) alive = 1;
+            }
+            /* ★★ Under --peru, let the KERNEL's own scheduler do the
+               dispatching -- no hand-dispatch at all.  proc0 is parked on a
+               br-to-self here, so it never yields and the scheduler never gets
+               a turn; that is the ONLY reason this hook ever had to pick a
+               process itself.  Jump into swtch_pri(-1) (c0055cc0) with r1
+               pointing back at the sentinel: it picks the highest-priority
+               runnable proc, sets both curprocs and load_contexts it, and the
+               machine finds its own way back here.
+
+               swtch_pri switches away WITHOUT queueing the outgoing proc (its
+               normal callers -- sleep and friends -- have already parked
+               themselves somewhere), so queue proc0 first or the scheduler can
+               never come back to us.
+
+               `alive` rather than `pick` decides when to stop: a descendant
+               that is merely ASLEEP (the shell in wait4 while its child runs)
+               still counts, or we would declare victory mid-script.  Bail out
+               if two yields in a row achieve nothing -- that is a real
+               deadlock, not a stop condition. */
+            if (peru && alive) {
+                static u64 last_count; static int idle_spins;
+                idle_spins = (cpu.count - last_count < 2000ull) ? idle_spins + 1 : 0;
+                last_count = cpu.count;
+                if (idle_spins < 2) {
+                    { u32 p0 = mem_r32(translate(0xC0014044u, 0));
+                      /* Queue proc0 at the WORST priority (p+0x84 is the user
+                         priority, +0x85 the current one; the queue index is
+                         pri/4, so 127 -> list 31).  Left at the swapper's own
+                         priority it is the best thing on the queue, swtch_pri
+                         picks it, sees it is already current, and returns
+                         without switching -- the yield achieves nothing.
+                         Lowest priority is what an idle loop should have. */
+                      if (p0) { mem_w8(translate(p0 + 0x84u, 0), 127);
+                                mem_w8(translate(p0 + 0x85u, 0), 127); }
+                      runq_add(p0); }
+                    WR(1, PROCEXP_IDLE);           /* return here afterwards */
+                    WR(2, 0xFFFFFFFFu);            /* swtch_pri(-1): any proc */
+                    cpu.pc = 0xC0055CC0u;
+                    continue;
+                }
+                printf("[procexp] scheduler made no progress -- deadlock?\n");
+            }
+            if (peru) pick = 0;        /* --peru never hand-dispatches */
             if (pick) {
                 u32 ctx = mem_r32(translate(pick + 0xC8u, 0));
                 printf("[procexp] dispatching proc %08x (pid %u, node %u) "
