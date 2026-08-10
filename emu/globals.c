@@ -187,13 +187,6 @@ int   sys_err;          /* errno, or 0 for success */
 int   verbose_sys;
 char kmsg_cons[KMSG_MAX], kmsg_log[KMSG_MAX], kmsg_last[KMSG_MAX];
 int  kmsg_conslen, kmsg_loglen;
-u32 upool_next = UPOOL_BASE;
-int utest;
-/* The segment table backing proc1's address space, once launch_utest builds it.
-   Both UAPR and SAPR point here while proc1 runs (pmap_activate sets both), so
-   a miss on either side with this APR is a fault in the user program. */
-u32 usegtab_cur;
-unsigned udemand_count;
 int  console_io = 1;                 /* --no-console disables      */
 int  console_port;                   /* --console-port=N: serve the interactive
                                         console on a loopback TCP socket (0=stdio) */
@@ -202,10 +195,7 @@ u8   fd_console[64] = { 1, 1, 1 };   /* which fds still reach the host */
 u32  fd_watch_pc;                    /* trap pc of an fd-returning syscall */
 int  fd_watch_pair;                  /* ...and it was pipe(2), returning two */
 int  fd_watch_con;                   /* ...and the source was the console    */
-u8   fd_watch_pipe;                  /* ...or a pipe                         */
 u32  con_out_bytes, con_in_bytes;
-Pipe pipes[MAX_PIPES];
-u8   fd_pipe[64];                    /* fd -> pipe index + 1 */
 u8   fd_disk[64];                    /* fd -> the raw sd0 device (routed to disk.img) */
 u32  disk_off[64];                   /* per-fd byte offset into disk.img (lseek) */
 int  fd_watch_disk;                  /* the fd-returning open was for the raw disk */
@@ -213,9 +203,6 @@ int  fd_watch_disk;                  /* the fd-returning open was for the raw di
    /hosttar and the emulator serves reads straight from this host file, so guest
    tools (tar) can consume an archive that lives on no filesystem.  Read-only. */
 const char *hostfile_path;
-const char *disk_mount;              /* --diskmount=/usr: where the guest mounts
-                                        disk.img, so execve can map a guest path
-                                        onto disk.img's FFS and load from there */
 FILE *hostfile_img;
 u32  hostfile_size;                  /* real byte length of the host file */
 u32  hostfile_vsize;                 /* length presented to the guest: real size
@@ -227,10 +214,7 @@ u32  host_off[64];                   /* per-fd byte offset into hostfile_img */
 const char *uargv[MAX_UARGV];
 const char *uenvp[MAX_UENVP];
 unsigned nuargv, nuenvp;
-UProc uprocs[MAX_UPROC];
-int   ucur = -1, next_pid = 2, uproc_on;
 const char *guest_root = "..";        /* extracted tape = the guest's / */
-int uproc_all_done;      /* set when the last process has exited */
 
 /* Named replacements for the former anonymous-struct globals (see nx88.h). */
 DevMap devmap[512];

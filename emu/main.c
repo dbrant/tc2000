@@ -26,19 +26,21 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--tape=", 7))  root_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--disk=", 7))  disk_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--hostfile=", 11)) hostfile_path = argv[i]+11;
-        else if (!strncmp(argv[i], "--diskmount=", 12)) disk_mount = argv[i]+12;
         else if (!strcmp(argv[i], "--scsi"))       sha_desc_clear = 0x14;
         else if (!strcmp(argv[i], "--identity"))   identity_mode = 1;
         else if (!strcmp(argv[i], "--clock"))      clock_irq = 1;
         else if (!strncmp(argv[i], "--clock=", 8)) { clock_irq = 1; clock_period = strtoull(argv[i]+8,0,0); }
         /* --- user-mode program launch --- */
-        else if (!strcmp(argv[i], "--shell")) {     /* boot, then hand off /bin/sh */
-            interactive = 1; utest = 1; deliver_traps = 1;
+        /* --shell: boot, then hand the terminal to the guest's own /bin/sh,
+           run as a REAL nX process.  It used to mean the synthetic process
+           model; that model is gone (see the note above --procexec), so this is
+           now just a set of defaults over --procexec. */
+        else if (!strcmp(argv[i], "--shell")) {
+            interactive = 1; deliver_traps = 1;
             trace_traps = 0; quiet_uproc = 1;
             limit = ~0ull;
         }
-        else if (!strcmp(argv[i], "--utest"))          { utest = 1; deliver_traps = 1; trace_traps = 1; }
-        else if (!strncmp(argv[i], "--uprog=", 8))     { uprog_path = argv[i]+8; utest = 1; deliver_traps = 1; trace_traps = 1; }
+        else if (!strncmp(argv[i], "--uprog=", 8))     { uprog_path = argv[i]+8; deliver_traps = 1; trace_traps = 1; }
         else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV) uargv[nuargv++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP) uenvp[nuenvp++] = argv[i] + 7;
         /* --- output / diagnostics --- */
@@ -81,6 +83,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
     }
+    /* Running a user program means running it as a REAL nX process.  There used
+       to be a second, SYNTHETIC model here -- the emulator serviced fork/exec/
+       wait/exit itself against its own process table and address space -- and
+       --uprog/--shell selected it.  It is gone: the kernel's own path does
+       everything it did, including the installer.  --procexp still opts into
+       the older hand-load path (the emulator loads the a.out instead of letting
+       execve do it), so do not override that one. */
+    if ((uprog_path || interactive) && !procexp) { procexp = 1; procexec = 1; }
+
     /* --procexec runs the kernel's own exec, which needs kernel memory to be
        coherent -- so it implies --dataphys.  It also defaults the machine to a
        genuinely single node: with 64 nodes the kernel puts every forked child
@@ -105,23 +116,6 @@ int main(int argc, char **argv)
         if (!cfg_nodes) cfg_nodes = 1;
         hwfault = !no_hwfault;
         peru    = !no_peru;
-        /* --diskmount is a shortcut for the SYNTHETIC process model only: it
-           lives in uproc_syscall's execve (proc.c case 59), which --procexec
-           switches off entirely.  Silently ignoring it just yields
-           "<path>: not found", so say so and point at the real route -- under
-           --procexec the guest can genuinely mount the disk and the kernel then
-           execs from it with no help from us. */
-        if (disk_mount) {
-            fprintf(stderr,
-                "nx88: --diskmount=%s has NO EFFECT with --procexec (it only\n"
-                "      works in the synthetic --uprog model).  Let the guest\n"
-                "      mount the disk for real instead, then exec the full path:\n"
-                "        nx88 sys <vmunix> --procexec --scsi --uprog=/bin/sh ...\n"
-                "        # /etc/mount /dev/sd0b %s\n"
-                "        # %s/bin/<prog>\n",
-                disk_mount, disk_mount, disk_mount);
-            disk_mount = 0;
-        }
     }
     if (nwords) path = words[0];
     if (!path) {
@@ -136,8 +130,8 @@ int main(int argc, char **argv)
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
                 "  --hostfile=PATH  expose a host file to the guest at /hosttar\n"
                 "               read-only (e.g. `tar xpf /hosttar` in the guest)\n"
-                "  --diskmount=DIR  guest mount point of disk.img, so execve can\n"
-                "               load binaries from the SCSI disk's own FFS\n"
+                "  --shell      boot, then hand the terminal to the guest's own\n"
+                "               /bin/sh, run as a real nX process\n"
                 "  --console-port=N  serve the interactive console on 127.0.0.1:N\n"
                 "               (VT100/telnet); the kernel log stays on stdout\n"
                 "  --watch=PC   dump registers every time PC executes\n"
@@ -182,11 +176,10 @@ int main(int argc, char **argv)
                 guest_root = gr;
             }
         }
-        /* --shell: everything else follows from the tape directory. */
+        /* --shell: everything else follows.  The path is a GUEST path now --
+           the kernel's execve resolves it in its own namespace. */
         if (interactive && !uprog_path) {
-            static char shpath[1024];
-            snprintf(shpath, sizeof shpath, "%s/bin/sh", guest_root);
-            uprog_path = shpath;
+            uprog_path = "/bin/sh";
             if (!nuargv) uargv[nuargv++] = "sh";
             if (!nuenvp) {
                 uenvp[nuenvp++] = "PATH=/bin:/etc:/usr/bin";

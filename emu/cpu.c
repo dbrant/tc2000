@@ -172,9 +172,12 @@ u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
     u32 tv = trap_vector, tp = dbg_pc;
     u64 used = guard;
     cpu = save;
-    if (returned)
-        printf("  [kcall %08x] -> %08x  (%llu steps)\n", fn, ret,
-               (unsigned long long)used);
+    /* Never over an interactive session -- the shell owns that terminal. */
+    if (returned) {
+        if (!interactive)
+            printf("  [kcall %08x] -> %08x  (%llu steps)\n", fn, ret,
+                   (unsigned long long)used);
+    }
     else
         printf("  [kcall %08x] DID NOT RETURN (%s pc=%08x vec=%d, %llu steps)\n",
                fn, trapped ? "trap" : "runaway", tp, (int)tv,
@@ -273,10 +276,9 @@ void runq_add(u32 p)
     kcall(0xC00559C8u, p, 0, 0, 0, 0);
 }
 
-/* The pid of whatever is running right now, for tracing.  Under --procexp the
-   kernel owns the process table, so ask it: curproc, then proc+0x4c (a
-   halfword, hence the shift).  Falls back to the synthetic model's pid when
-   that is what is driving (--uprog), and 0 when neither is up yet. */
+/* The pid of whatever is running right now, for tracing.  The kernel owns the
+   process table, so ask it: curproc, then proc+0x4c (a halfword, hence the
+   shift).  0 before any process of ours exists. */
 int real_pid(void)
 {
     if (procexp) {
@@ -284,7 +286,7 @@ int real_pid(void)
         if (cp) return (int)(mem_r32(translate(cp + 0x4Cu, 0)) >> 16);
         return 0;
     }
-    return ucur >= 0 ? uprocs[ucur].pid : 0;
+    return 0;
 }
 
 /* The pid of the current process's PARENT (proc+0x18 -> its pid), for the
@@ -356,7 +358,9 @@ static void uput32(u32 pmap, u32 va, u32 v)
 }
 
 /* Create a real process with the kernel's own newproc(), at the swapper idle
-   point.  This is the step the synthetic proc1 model has always faked. */
+   point, and hand it a program to run.  This is the ONLY way userland starts
+   now: the emulator-serviced process model that used to sit beside it (its own
+   process table, address space and fork/exec/wait/exit) is gone. */
 int proc_experiment(void)
 {
     u32 base = kr32(G_PROCBASE), cur = kr32(G_CURPROC);
@@ -596,7 +600,7 @@ int proc_experiment(void)
        correctly and silently produced nothing.  The emulator answers I/O on
        fds 0-2 itself (console_syscall) and propagates that through dup/dup2, so
        what these are attached to hardly matters; they just have to EXIST.  Open
-       /dev/null three times, exactly as the synthetic bootstrap does.
+       /dev/null three times.
        open() returns to pc+4 on error and pc+8 on success, so the error slot
        holds a branch to the success slot and both converge. */
     u32 boot[] = {
@@ -692,6 +696,10 @@ int proc_experiment(void)
     cpu.pc = 0xC0017498u;                         /* load_context(ctx) */
     printf("  load_context(%08x): resuming as pid %u, entry %08x, sp %08x\n",
            ctx, kr32(p + P_PID) >> 16, a.entry, sp);
+    if (interactive)
+        con_write_str("\n=== nX on the TC2000 -- /bin/sh from the 1989 install "
+                      "tape ===\nThe root filesystem is the tape's own UFS.  "
+                      "^D or `exit' quits.\n\n");
     return 1;
 }
 

@@ -238,39 +238,17 @@ static u32 con_read_line(u8 *dst, u32 max)
     return n;
 }
 
-int pipe_alloc(void)
-{
-    for (int i = 0; i < MAX_PIPES; i++)
-        if (!pipes[i].used) {
-            pipes[i].used = 1; pipes[i].len = pipes[i].rpos = 0;
-            if (!pipes[i].buf) { pipes[i].cap = 65536; pipes[i].buf = malloc(pipes[i].cap); }
-            return i;
-        }
-    return -1;
-}
-
-void pipe_write(Pipe *p, const u8 *src, u32 n)
-{
-    if (p->len + n > p->cap) {
-        while (p->len + n > p->cap) p->cap *= 2;
-        p->buf = realloc(p->buf, p->cap);
-    }
-    memcpy(p->buf + p->len, src, n);
-    p->len += n;
-}
-
 int fd_is_console(u32 fd)
 {
     return console_io && fd < 64 && fd_console[fd];
 }
 
 /* Service raw-disk (sd0) read/write/lseek directly against emu/disk.img.
-   The kernel's raw physio DMAs to the user buffer's *kernel-pmap* physical, but
-   our synthetic user process reads through its own usegtab (a different physical
-   page), so the transferred bytes never reach it.  Rather than reconcile those
-   two mappings, service the raw device in the emulator: read/write disk.img at
-   the fd's byte offset straight into/out of the user buffer via translate() --
-   the same usegtab the process itself uses.  Returns 1 if handled. */
+   The kernel's raw physio DMAs to the user buffer's *kernel-pmap* physical,
+   which is not where the faulting process reads it, so the transferred bytes
+   never arrive.  Rather than reconcile those two mappings, service the raw
+   device in the emulator: read/write disk.img at the fd's byte offset straight
+   into/out of the user buffer via translate().  Returns 1 if handled. */
 int disk_syscall(u32 sysno, u32 tpc)
 {
     u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
@@ -407,26 +385,6 @@ int console_syscall(u32 sysno, u32 tpc)
 {
     u32 a0 = RD(2), a1 = RD(3), a2 = RD(4);
     long ret;
-    /* Pipe traffic first: these descriptors are real kernel descriptors, but
-       the bytes are ours (see the pipe notes above). */
-    if ((sysno == 3 || sysno == 4) && a0 < 64 && fd_pipe[a0]) {
-        Pipe *p = &pipes[fd_pipe[a0] - 1];
-        if (sysno == 4) {
-            u8 *tmp = malloc(a2 ? a2 : 1);
-            for (u32 i = 0; i < a2; i++) tmp[i] = mem_r8(translate(a1 + i, 0));
-            pipe_write(p, tmp, a2);
-            free(tmp);
-            ret = (long)a2;
-        } else {
-            u32 avail = (u32)(p->len - p->rpos), n = a2 < avail ? a2 : avail;
-            n = uwrite_mem(a1, p->buf + p->rpos, n);
-            p->rpos += n;
-            ret = (long)n;                             /* 0 == end of file */
-        }
-        WR(2, (u32)ret);
-        cpu.pc = tpc + 8;
-        return 1;
-    }
     switch (sysno) {
     case 4: {                                          /* write(fd, buf, n) */
         if (!fd_is_console(a0)) return 0;
@@ -468,7 +426,7 @@ int console_syscall(u32 sysno, u32 tpc)
 /* ---------------------------------------------------------------------------
    ★ PER-PROCESS descriptor flags.
 
-   fd_console/fd_pipe/fd_disk/fd_kernel say which fd NUMBERS the emulator
+   fd_console/fd_disk/fd_kernel say which fd NUMBERS the emulator
    answers for rather than the kernel.  They were one global set, which was
    fine while only one process existed.  With real fork/exec they have to be
    per-process: /bin/echo closes 0, 1 and 2 in its exit path, and that wiped
@@ -484,7 +442,7 @@ int console_syscall(u32 sysno, u32 tpc)
 #define FDSETS 24
 typedef struct {
     int  pid, used;
-    u8   con[64], pip[64], dsk[64], krn[64];
+    u8   con[64], dsk[64], krn[64];
     u32  doff[64];
 } FdSet;
 static FdSet fdsets[FDSETS];
@@ -501,14 +459,14 @@ static FdSet *fdslot(int pid)
 
 static void fd_save(FdSet *s)
 {
-    memcpy(s->con, fd_console, 64); memcpy(s->pip, fd_pipe, 64);
+    memcpy(s->con, fd_console, 64);
     memcpy(s->dsk, fd_disk, 64);    memcpy(s->krn, fd_kernel, 64);
     memcpy(s->doff, disk_off, sizeof disk_off);
 }
 
 static void fd_load(const FdSet *s)
 {
-    memcpy(fd_console, s->con, 64); memcpy(fd_pipe, s->pip, 64);
+    memcpy(fd_console, s->con, 64);
     memcpy(fd_disk, s->dsk, 64);    memcpy(fd_kernel, s->krn, 64);
     memcpy(disk_off, s->doff, sizeof disk_off);
 }

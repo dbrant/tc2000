@@ -124,7 +124,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
                    (unsigned long long)cpu.count);
             if (procexp) { if (proc_experiment()) continue; break; }  /* real proc */
             if (vmexp) { vm_experiment(); break; }      /* step-2 VM RPC probe */
-            if (utest) { launch_utest(); continue; }   /* drop to user mode */
             break;
         }
         /* --procexp: the process has exited and the kernel switched back to
@@ -245,8 +244,11 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 cpu.pc = 0xC0017498u;                       /* load_context */
                 continue;
             }
-            printf("[procexp] all our processes exited @%llu\n",
-                   (unsigned long long)cpu.count);
+            if (interactive)
+                printf("\n[halt] shell exited -- machine halted.\n");
+            else
+                printf("[procexp] all our processes exited @%llu\n",
+                       (unsigned long long)cpu.count);
             if (!verbose_sys) break;
             proc_table_dump();
             if (1) break;
@@ -336,27 +338,10 @@ int run_sys(const char *path, u64 limit, u32 sig)
             if (RD(2) < 64) {
                 fd_kernel[RD(2)] = 1;                  /* kernel owns this fd */
                 if (fd_watch_con) fd_console[RD(2)] = 1;
-                if (fd_watch_pipe) fd_pipe[RD(2)] = fd_watch_pipe;
                 if (fd_watch_disk) { fd_disk[RD(2)] = 1; disk_off[RD(2)] = 0; }
             }
-            if (fd_watch_pair && RD(3) < 64 && RD(2) < 64) {
-                fd_kernel[RD(3)] = 1;                  /* pipe(2): two fds */
-                /* ★ Emulator-buffered pipes are a SYNTHETIC-model crutch: those
-                   processes cannot sleep, so a pipe needs an unbounded buffer
-                   where an empty read means EOF, and the child has to be run
-                   first.  Under --procexec the kernel has real processes and
-                   real, BLOCKING pipes -- intercepting them instead breaks
-                   command substitution, because the kernel is free to schedule
-                   the reader first and our buffer then reports EOF.  Symptom:
-                   `x=`ls | grep bin`` came back empty (a plain `ls | grep bin`
-                   was fine -- there the shell never reads the pipe itself), and
-                   /etc/nxinstall then tried to exec "/" and died.  So leave
-                   pipes to the kernel here. */
-                if (!procexec) {
-                    int pi = pipe_alloc();             /* ...one buffer     */
-                    if (pi >= 0) fd_pipe[RD(2)] = fd_pipe[RD(3)] = (u8)(pi + 1);
-                }
-            }
+            if (fd_watch_pair && RD(3) < 64 && RD(2) < 64)
+                fd_kernel[RD(3)] = 1;      /* pipe(2) returns TWO descriptors */
             fd_watch_pc = 0; fd_watch_pair = 0; fd_watch_con = 0; fd_watch_disk = 0;
         }
         if (ufault_pending) {
@@ -382,7 +367,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                paging -- vm_map_pageable reports success on a COW entry without
                materialising the page. */
             if (hwfault) {
-                if (ufaults++ < (verbose_sys ? 100000u : 12u))
+                if (!interactive && ufaults++ < (verbose_sys ? 100000u : 12u))
                     printf("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",
                            real_pid(), ufault_va,
                            ufault_code ? "code" : "data",
@@ -472,8 +457,8 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     continue;
                 }
                 /* Raw sd0 read/write/lseek serviced from disk.img (see
-                   disk_syscall) -- the kernel's raw DMA can't reach our
-                   synthetic user buffers. */
+                   disk_syscall) -- the kernel's raw DMA does not land where the
+                   faulting process reads it. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
                     && disk_syscall(RD(9), trap_pc)) {
                     trap_taken = 0;
@@ -484,21 +469,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
                     && hostfile_syscall(RD(9), trap_pc)) {
                     trap_taken = 0;
-                    continue;
-                }
-                /* fork/execve/wait/exit are serviced here too; see the
-                   process-management notes above. */
-                if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
-                    && uproc_syscall(RD(9), trap_pc)) {
-                    trap_taken = 0;
-                    if (uproc_all_done) {
-                        if (interactive)
-                            printf("\n[halt] shell exited -- machine halted.\n");
-                        else
-                            printf("[uproc] all processes exited @%llu\n",
-                                   (unsigned long long)cpu.count);
-                        break;
-                    }
                     continue;
                 }
                 /* Remember fd-returning syscalls so their result can be marked
@@ -527,7 +497,6 @@ int run_sys(const char *path, u64 limit, u32 sig)
                        shell reads its input through a dup of fd 0, so without
                        this its `read` builtin sees EOF. */
                     fd_watch_con = (RD(9) == 41 && RD(2) < 64) ? fd_console[RD(2)] : 0;
-                    fd_watch_pipe = (RD(9) == 41 && RD(2) < 64) ? fd_pipe[RD(2)] : 0;
                     if (RD(9) == 41 && RD(2) < 64 && fd_disk[RD(2)]) fd_watch_disk = 1;
                 }
                 if (verbose_sys && trap_vector == 128
@@ -539,14 +508,13 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 }
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
                     && RD(2) < 64)
-                    fd_kernel[RD(2)] = fd_console[RD(2)] = fd_pipe[RD(2)] =
+                    fd_kernel[RD(2)] = fd_console[RD(2)] =
                         fd_disk[RD(2)] = 0;
                 /* dup2 replaces the target outright, terminal-ness included --
                    this is how a shell redirect takes stdout off the console. */
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u)
                     && RD(9) == 90 && RD(3) < 64 && RD(2) < 64)
                     fd_console[RD(3)] = fd_console[RD(2)],
-                    fd_pipe[RD(3)] = fd_pipe[RD(2)],
                     fd_disk[RD(3)] = fd_disk[RD(2)],
                     disk_off[RD(3)] = disk_off[RD(2)];
                 deliver_trap(trap_vector, trap_pc);

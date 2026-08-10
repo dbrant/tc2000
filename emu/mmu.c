@@ -386,13 +386,6 @@ u32 translate(u32 va, int code)
        which supplies node-correct physical addresses for kernel memory */
     u32 pa, pd = 0;
     if (!walk_fb(apr, va, code, &pa, &pd)) {
-        /* Demand paging for our synthetic user space.  The kernel's VM has no
-           idea this address space exists, so a real access fault would find
-           no vm_map entry; instead we do what the pager would: hand out a
-           zeroed page and map it.  This is what lets obreak's heap growth and
-           deep stacks actually be touchable. */
-        u32 dp = udemand_page(apr, va);
-        if (dp) return dp | (va & 0xFFF);
         /* A real user process (--procexp) faults: the kernel's exec maps its
            image demand-paged, so the first touch of every page misses here.
            Record it and abort the instruction; run_sys resolves it through the

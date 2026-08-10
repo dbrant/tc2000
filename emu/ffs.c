@@ -1,13 +1,21 @@
 /* Read-only 4.3BSD FFS reader over disk.img.
  *
- * The emulator's execve shortcut normally loads a binary's a.out image from the
- * host tape directory (guest_root).  Tools that live only on the SCSI disk are
- * invisible to that path, so this module resolves a path within disk.img's own
- * FFS -- superblock -> name lookup -> inode -> data blocks -- and hands the file
- * bytes back for aout_load_mem().  Big-endian; the on-disk field offsets were
- * pinned against a disk.img the guest itself newfs'd and populated (verified by
- * reading a known binary back byte-for-byte).  Read-only: no allocation, no
- * bitmap or cylinder-group summary maintenance. */
+ * ★ NOT LINKED INTO THE EMULATOR any more.  It existed to serve --diskmount in
+ * the SYNTHETIC process model, whose execve loaded a.out images from host files
+ * and so could not see anything the guest had mounted.  That model is gone: the
+ * kernel's own execve reads the disk through its own buffer cache, so a real
+ * in-guest `mount /dev/sd0b /mnt` makes /mnt/bin/prog directly executable and
+ * no host-side FFS reader is needed.
+ *
+ * It stays because it is still the only way to browse disk.img FROM THE HOST.
+ * To use it, compile a throwaway that #includes this file (the namei/read_ino
+ * helpers are static) and link everything except ffs.c.  ffs_read_file() takes
+ * only REGULAR files; directories return -1 by design.
+ *
+ * Superblock -> name lookup -> inode -> data blocks.  Big-endian; the on-disk
+ * field offsets were pinned against a disk.img the guest itself newfs'd and
+ * populated (verified by reading a known binary back byte-for-byte).  Read-only:
+ * no allocation, no bitmap or cylinder-group summary maintenance. */
 #include "nx88.h"
 
 #define FFS_SBOFF        8192      /* superblock byte offset (BBSIZE)          */

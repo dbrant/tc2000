@@ -91,16 +91,10 @@ typedef uint64_t u64;
 #define HDR_PAGE 8192
 #define STACK_TOP 0x7FFF0000u
 #define KMSG_MAX 512
-#define UPOOL_BASE 0xDD000000u
 #define UAREA_VA   0xFBFFE000u          /* _u: the per-process kernel state */
 #define UAREA_SIZE 0x2000u
-#define UBOOT_VA   0x7F000000u
-#define UBRK_TOP   0x00400000u          /* data segment granted to the kernel */
-#define UBOOT_DONE 0x3F0u
-#define MAX_PIPES 32
 #define MAX_UARGV 32
 #define MAX_UENVP 32
-#define MAX_UPROC 32
 #define U_OFILE   0x748u
 #define U_NOFILE  64
 #define F_COUNT   0x0eu
@@ -123,18 +117,6 @@ typedef struct {
     long size;
 } AOut;
 
-typedef struct { int used; u8 *buf; size_t len, cap, rpos; } Pipe;
-
-typedef struct {
-    int used, zombie, waiting, status;
-    int pid, ppid;
-    u32 wait_statusp;
-    u32 brk;
-    u32 segtab, pc, r[32];
-    u8  uarea[UAREA_SIZE];
-    u8  fdcon[64];
-    u8  fdpipe[64];
-} UProc;
 
 typedef struct { u32 va, pa; } DevMap;    /* device VA->PA map entry */
 typedef struct { u32 tag, pa; } TlbEnt;   /* per-side TLB entry      */
@@ -250,10 +232,6 @@ extern int sys_err;
 extern int verbose_sys;
 extern char kmsg_cons[], kmsg_log[], kmsg_last[];
 extern int kmsg_conslen, kmsg_loglen;
-extern u32 upool_next ;
-extern int utest;
-extern u32 usegtab_cur;
-extern unsigned udemand_count;
 extern int console_io ;
 extern int console_port ;
 extern u8 fd_kernel[];
@@ -261,26 +239,19 @@ extern u8 fd_console[64];
 extern u32 fd_watch_pc;
 extern int fd_watch_pair;
 extern int fd_watch_con;
-extern u8 fd_watch_pipe;
 extern u32 con_out_bytes, con_in_bytes;
-extern Pipe pipes[];
-extern u8 fd_pipe[64];
 extern u8 fd_disk[64];
 extern u32 disk_off[64];
 extern const char *hostfile_path;
 extern FILE *hostfile_img;
 extern u32 hostfile_size, hostfile_vsize;
-extern const char *disk_mount;      /* --diskmount: guest mount point of disk.img */
 extern u8 fd_host[64];
 extern u32 host_off[64];
 extern int fd_watch_disk;
 extern const char *uargv[];
 extern const char *uenvp[];
 extern unsigned nuargv, nuenvp;
-extern UProc uprocs[MAX_UPROC];
-extern int ucur , next_pid , uproc_on;
 extern const char *guest_root ;
-extern int uproc_all_done;
 
 
 /* -------------------------------------------- named-struct machine state */
@@ -402,43 +373,20 @@ void fp_write(u32 reg, int prec, double v);
 int step(void);
 int aout_load(const char *path, AOut *a);
 int aout_load_mem(u8 *img, u32 size, AOut *a);
-int ffs_read_file(const char *path, u8 **buf, u32 *len);
 void do_syscall(void);
 u32 build_stack(int argc, char **argv);
 int run_user(const char *path, int argc, char **argv, u64 limit);
 void kmsg_line(const char *s, int is_log);
 void kmsg_putchar(int c, u32 flags);
 void kmsg_flush(void);
-u32 upool_alloc(void);
-void umap(u32 segtab, u32 va, u32 pa);
-u32 udemand_page(u32 apr, u32 va);
-int pipe_alloc(void);
-void pipe_write(Pipe *p, const u8 *src, u32 n);
 int fd_is_console(u32 fd);
 int console_syscall(u32 sysno, u32 tpc);
 void console_listen(int port);
 void con_write_str(const char *s);
 int disk_syscall(u32 sysno, u32 tpc);
 int hostfile_syscall(u32 sysno, u32 tpc);
-void uwrite8(u32 segtab, u32 va, u8 b);
-void uwrite32(u32 segtab, u32 va, u32 v);
-int load_user_prog_av(const char *path, u32 segtab, u32 *entry, u32 *sp_out, const char **av, unsigned nav, const char **ev, unsigned nev);
-const char *guest_path(const char *p);
 int uread_str(u32 va, char *buf, size_t n);
 u32 uwrite_mem(u32 va, const u8 *src, u32 n);
-u32 aspace_clone(u32 src);
-void uproc_activate(u32 segtab);
-void uarea_dup_files(void);
-void uarea_save(UProc *u);
-void uarea_load(const UProc *u);
-void uctx_save(u32 pc);
-void uctx_load(int i);
-int uproc_new(int ppid, u32 segtab);
-int uproc_runnable(void);
-int uproc_find_pid(int pid);
-int uproc_syscall(u32 sysno, u32 tpc);
-u32 create_proc1(u32 user_pc, u32 user_sp, u32 usegtab);
-void launch_utest(void);
 int run_sys(const char *path, u64 limit, u32 sig);
 
 #endif /* NX88_H */
