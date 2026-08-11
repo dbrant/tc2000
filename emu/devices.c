@@ -62,6 +62,31 @@ void memop(u32 sub, u32 D, u32 ea)
         WR(D, mem_r16(ea) & ~1u);
         return;
     }
+    /* ★ THE DIAGNOSTIC OUTPUT RING -- and WE are the missing consumer.
+       The node talks to the front-end through a 128-byte ring at 0xFE001818
+       with a consumer index at 0xFE001802 and a producer index at 0xFE001803
+       (measured: c009d304-c009d32c stores the byte at `base[prod]`, advances
+       `prod = (prod+1) & 0x7f`, and stalls when `cons == (prod+1) & 0x7f`).
+       `_outputwakeup` (c009d888) then spins `while (cons != prod)` waiting for
+       the front end to catch up.
+
+       Nothing here ever moved that index, so the first message queued through
+       it spun forever.  That never showed up before because this ring is only
+       reached from _hps_poll -- software interrupt source 14 -- and no software
+       interrupt was ever dispatched at all.  Model the front end the same way
+       the SHA is modelled: it drains instantly, so the consumer index is
+       always caught up with the producer.  --kmsg shows what it drained. */
+    if (sysmode && ea == HPS_RING_CONS && (sub == 0x03 || sub == 0x07)) {
+        u8 cons = mem_r8(HPS_RING_CONS), prod = mem_r8(HPS_RING_PROD);
+        while (cons != prod) {
+            u8 c = mem_r8(HPS_RING_BUF + cons);
+            if (kmsgs) putchar(c ? c : ' ');
+            cons = (u8)((cons + 1) & 0x7F);
+        }
+        mem_w8(HPS_RING_CONS, cons);
+        WR(D, sub == 0x07 ? (u32)(s32)(int8_t)cons : cons);
+        return;
+    }
     /* The free-running timer at 0xE07E8018 must respond to sub-word reads too:
        _startclock_duart polls it with ld.h and spins until it changes. */
     if (sysmode && (ea & ~3u) == TIMER_ADDR) {
@@ -144,7 +169,7 @@ void dev_write32(u32 a, u32 v)
         if (a == CMRAM_SELECT) { cmram_sel = v; return; }
         if (a == CMRAM_DATA) { cmram_w32(cmram_sel & ~3u, v); cmram_writes++; return; }
         if (a == IRQ_SOURCE_REG) { irq_source = v; return; } /* ack clears src */
-        /* hardclock deadline / enable -- see the note by clock_div */
+        /* hardclock deadline / enable -- see the note by clock_deadline */
         if (a == TIMER_CMP_REG) { clock_deadline = v; clock_armed = 1; }
         if (a == TIMER_ENA_REG) clock_enabled = (v != 0);
     }

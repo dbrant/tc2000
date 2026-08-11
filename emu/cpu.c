@@ -55,6 +55,36 @@ void vm_probe_tick(u32 pc)
             break;
         }
 }
+/* ---- --profile: a flat PC histogram -------------------------------------
+   Buckets kernel text (and only kernel text -- user PCs are per-process and
+   would blur together) into 32-byte bins, which is fine enough to name a
+   busy-wait's loop body and coarse enough to fit in a flat array. */
+#define PROF_LO   0xC0010000u
+#define PROF_BINS (0x100000u / 32u)          /* 1 MB of text, 32 bytes per bin */
+static u64 prof_hist[PROF_BINS], prof_other;
+void prof_bucket(u32 pc)
+{
+    u32 i = (pc - PROF_LO) / 32u;
+    if (pc >= PROF_LO && i < PROF_BINS) prof_hist[i]++; else prof_other++;
+}
+void prof_report(void)
+{
+    u64 tot = prof_other;
+    for (u32 i = 0; i < PROF_BINS; i++) tot += prof_hist[i];
+    printf("=== profile: hottest kernel-text 32-byte bins (%llu instructions, "
+           "%llu outside kernel text) ===\n",
+           (unsigned long long)tot, (unsigned long long)prof_other);
+    for (int rank = 0; rank < 20; rank++) {
+        u32 best = 0; u64 bv = 0;
+        for (u32 i = 0; i < PROF_BINS; i++)
+            if (prof_hist[i] > bv) { bv = prof_hist[i]; best = i; }
+        if (!bv) break;
+        printf("  %08x  %12llu  %5.2f%%\n", PROF_LO + best * 32u,
+               (unsigned long long)bv, tot ? 100.0 * (double)bv / (double)tot : 0.0);
+        prof_hist[best] = 0;
+    }
+}
+
 void vm_probe_report(void)
 {
     printf("=== VM probe: kernel VM/fault machinery calls ===\n");
@@ -1275,32 +1305,71 @@ int step(void)
        and the re-assert is rate-limited to the tick, because a pending bit
        stays set until its handler runs.  (Gating on user mode instead does NOT
        work: when every process is asleep in sigpause, which is exactly when
-       the timer must fire, nothing is in user mode at all.) */
+       the timer must fire, nothing is in user mode at all.)
+
+       ★★ AND THE LINE HAS TO BE THE RIGHT ONE.  The controller's pending
+       register 0xE0780018 is decoded by source, and the ISR reaches its
+       software-interrupt block ONLY through **bit 5**:
+
+           c0016088  bb0.n 5, r23, c00160cc    ; bit 5 clear -> skip it entirely
+           c00160a4  ld    r6, [0xC00140CC]    ; ...the pending software mask
+           c00160ac  mak   r4, r3, r15         ; 2 << spl
+           c00160b4  and.c r7, r6, r5          ; dispatch = pending & ~((2<<spl)-1)
+
+       Everything else in that register goes through the table at 0xC009CC08,
+       indexed by bits 7:4, which turns bit 6 into work bit 27 = _hardclock.
+       So a re-assert delivered as bit 6 -- which is what this did, because it
+       left `irq_source` at whatever the last hardclock set -- runs the
+       hardclock again and never even LOOKS at 0xC00140CC.  That is why bit 2
+       sat pending forever with the spl gate wide open: the spl was never the
+       problem, the source number was.  _enable keeps bit 5 unmasked up to
+       spl 0x15, well above the spl <= 1 that softclock itself needs. */
     if (clock_irq && sysmode && !cpu.has_pending && !(cpu.cr[1] & 2u)
         && cpu.cr[7] >= 0xC0000000u && !ufault_pending && !in_kcall
-        && (mem_r32(IRQ_MASK_REG) & IRQ_HARDCLOCK)) {
+        && (mem_r32(IRQ_MASK_REG) & IRQ_SOFTINT)) {
         u32 spl  = mem_r32(translate(SPL_LEVEL, 0));
         u32 pend = mem_r32(translate(SOFTINT_PENDING, 0));
         u32 open = (spl >= 31) ? 0u : ~((2u << spl) - 1u);
         /* Rate-limited to the tick: a pending bit stays set until its handler
            runs, so re-asserting on every user-mode instruction just starves the
            machine in its own ISR. */
-        if ((pend & open) && cpu.count >= next_softint) {
-            next_softint = cpu.count + clock_period;
+        if ((pend & open) && spl != 0x1f && cpu.count >= next_softint) {
+            next_softint = cpu.count + softint_period;
             softint_ticks++;
+            irq_source = IRQ_SOFTINT;
             deliver_exception(1);
             return 0;
         }
     }
 
+    /* ★ THE HARDCLOCK IS A DEADLINE COMPARATOR, and once the free-running
+       counter runs at a real microsecond rate we can finally use it as one.
+       Each tick the ISR does (c00495e0-c00495ec) `deadline = counter + 10000`,
+       i.e. hz = 100.  Pacing the tick off that register instead of off a fixed
+       instruction count is what makes the kernel's own arithmetic consistent:
+       the time struct at [0xC0014618] advances one tick per interrupt, callouts
+       are scheduled in ticks, and itimer expiry compares that against elapsed
+       microseconds.  With the two paced independently they drift without limit
+       -- measured 377..2377 ticks past due before this.
+
+       `clock_armed` is the comparator's match latch: the write to the compare
+       register re-arms it (devices.c) and a delivered interrupt clears it, so
+       one programmed deadline yields exactly one interrupt no matter how far
+       past it we are when the kernel finally unmasks. */
     if (clock_irq && sysmode && !cpu.has_pending && !(cpu.cr[1] & 2u)
         && cpu.cr[7] >= 0xC0000000u
-        && cpu.count >= next_clock
+        && (tick_div ? (clock_armed && (s32)(timer_now() - clock_deadline) >= 0)
+                     : (cpu.count >= next_clock))
         && (mem_r32(IRQ_MASK_REG) & IRQ_HARDCLOCK)
         && !ufault_pending && !in_kcall) {
         next_clock = cpu.count + clock_period;
+        clock_armed = 0;
         clock_ticks++;
-        irq_source = 0x40;
+        /* Report every asserted source, as the real controller would: if a
+           software interrupt is also outstanding, this one entry can service
+           both -- the ISR runs the bit-5 block before the hardclock's. */
+        irq_source = IRQ_HARDCLOCK;
+        if (mem_r32(translate(SOFTINT_PENDING, 0))) irq_source |= IRQ_SOFTINT;
         deliver_exception(1);               /* interrupt vector */
         return 0;
     }
@@ -1400,16 +1469,25 @@ int step(void)
         }
     } else if (op == 0x21) {                                          /* FPU */
         u32 fop = (w >> 11) & 0x1F;
-        /* ★ Operand-size fields, and they are NOT in the order you would
-           guess: TD is the LOW pair (bits 6-5) and T2 the high one (10-9).
-           With them the other way round the emulator contradicted itself --
-           `flt` wrote r24 as a single while `fsub.ddd` two instructions later
-           read the same register as a double.  Decoded correctly, snake's
-           `flt` is int->double and its `fcmp` compares two doubles, which is
-           what the register contents actually hold.  (tools/m88k.py has the
-           same swap, so disassembly prints `flt.sd` for what is really
-           `flt.ds` -- do not take those suffixes as evidence.) */
-        int td = (w >> 5) & 3, t1 = (w >> 7) & 3, t2 = (w >> 9) & 3;
+        /* ★ Operand-size fields: **T1 at 10-9, T2 at 8-7, TD at 6-5.**
+           TD being the LOW pair is the counter-intuitive part, and getting it
+           wrong is what used to make `flt` write r24 as a single while
+           `fsub.ddd` two instructions later read the same register as a double.
+
+           ★★ T1 and T2 were then ALSO swapped, and that was wrong -- fixed
+           after /usr/games/trek died on "TREK SYSERR: Device probabilities sum
+           to 36".  The one-operand conversions (int/nint/trnc/fsqrt) take their
+           operand from **S2**, so the field that sizes it is T2; with T2 read
+           from 10-9, trek's `trnc` (60 of them, every one encoded
+           b10-9=s b8-7=d b6-5=s) truncated the high word of each double as if
+           it were a single.  Measured live: the doubles are 70, 110, 110, 125,
+           125, 75, 150, 20, 35, 30, 20, 50, 80, 0, 0, 0 -- exactly the 1000
+           trek checks for -- and reading their high words as singles gives
+           3+3+3+3+3+3+3+2+3+2+2+3+3 = **36**, the reported number.
+           The swap was invisible in snake because its operands were the same
+           precision either way; only a one-operand instruction can see it.
+           This is the documented MC88100 SFU1 layout. */
+        int td = (w >> 5) & 3, t2 = (w >> 7) & 3, t1 = (w >> 9) & 3;
         u32 S2 = w & 31;
         switch (fop) {
         case 0x05: fp_write(D, td, fp_read(S1,t1) + fp_read(S2,t2)); break; /* fadd */

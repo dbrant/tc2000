@@ -47,6 +47,16 @@ typedef uint64_t u64;
                                        per-level interrupt mask here */
 #define SOFTINT_PENDING 0xC00140CCu /* pending software-interrupt mask */
 #define IRQ_HARDCLOCK  0x40u        /* hardclock's bit in both regs   */
+/* ★ The SOFTWARE-interrupt line is a source of its own, bit 5.  The ISR tests
+   it explicitly (c0016088 `bb0 5`) and only then looks at SOFTINT_PENDING;
+   every other bit of IRQ_SOURCE_REG is decoded through the table at
+   0xC009CC08 (bits 7:4), where bit 6 means "work bit 27" = _hardclock.
+   _enable leaves bit 5 unmasked up to spl 0x15. */
+#define IRQ_SOFTINT    0x20u
+/* Front-end diagnostic output ring (see the drain in memop): 128 bytes. */
+#define HPS_RING_CONS  0xFE001802u
+#define HPS_RING_PROD  0xFE001803u
+#define HPS_RING_BUF   0xFE001818u
 #define IRQ_SOURCE_REG 0xE0780018u
 #define SPL_LEVEL      0xC0014064u  /* current interrupt priority level */
 #define SHA_BASE   0xFC008800u
@@ -148,13 +158,24 @@ extern u32 trap_vector;
 extern u32 trap_pc;
 extern int sysmode;
 extern u32 tick_scale ;
-extern u32 clock_div, clock_deadline;
+extern u32 tick_div ;
+extern u32 clock_deadline;
 extern int clock_irq;
 extern int clock_armed, clock_enabled;
 #define TIMER_CMP_REG 0xE07E0004u   /* hardclock deadline compare */
 #define TIMER_ENA_REG 0xE07E0000u   /* hardclock interrupt enable */
+/* The free-running counter at 0xE07E8018 counts MICROSECONDS (proved by the
+   delay(ms) loop at c00a2680 multiplying its argument by 1000).  Two rates:
+     tick_div == 0  -- the historical fast counter, `count * tick_scale`, which
+                       makes every delay() finish instantly but is 2000x too
+                       fast for any elapsed-time arithmetic to work.
+     tick_div  > 0  -- a GENUINE microsecond clock: tick_div instructions per
+                       microsecond, so this machine simply runs at 1/tick_div
+                       MHz.  --clock selects this (tick_div 1), which is what
+                       makes hz, the hardclock deadline, callouts and itimers
+                       all agree with one another. */
 static inline u32 timer_now(void)
-{ return (u32)(cpu.count * tick_scale); }
+{ return tick_div ? (u32)(cpu.count / tick_div) : (u32)(cpu.count * tick_scale); }
 extern u32 sha_done_status ;
 extern u32 sha_desc_clear ;
 extern const u8 memop_scale[] ;
@@ -167,6 +188,7 @@ extern u64 cmram_reads, cmram_writes;
 extern u8 **cmram_pages;
 extern u32 watch_pc;
 extern u64 wtrace_n, wtrace_left, wtrace_at, clock_ticks, softint_ticks, next_softint;
+extern u64 softint_period;
 extern int in_kcall;
 extern int disk_wrote, fs_synced;
 extern int dump_pchist;
@@ -174,6 +196,9 @@ extern int vmprobe;
 extern int vmexp;
 void vm_probe_tick(u32 pc);
 void vm_probe_report(void);
+void prof_bucket(u32 pc);
+void prof_report(void);
+extern int profile;
 extern int ctxtrace;
 extern u32 wmem_lo, wmem_hi;
 extern u64 wmem_max;

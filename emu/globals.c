@@ -27,24 +27,34 @@ u32   trap_vector;
 u32   trap_pc;
 /* forward decls so memop can service the free-running timer at all widths */
 int  sysmode;
+/* Microseconds per instruction for the CLOCK-OFF counter.  2000 is absurdly
+   fast on purpose -- it makes every delay() finish in a couple of instructions
+   -- and every clock-off instruction count in the regression list depends on
+   it, so it does not change. */
 u32  tick_scale = 2000;
+/* Instructions per microsecond when the counter runs at a real rate; 0 selects
+   the counter above.  --clock sets it to 1, i.e. a 1 MHz machine.
+   (--tickdiv=N overrides, including --tickdiv=0 to get the fast counter back
+   with interrupts still on, which is the A/B for anything below.) */
+u32  tick_div;
 /* ★ The hardclock is a DEADLINE COMPARATOR, not a periodic tick.  Each time it
    fires, the ISR reads the free-running counter at 0xE07E8018, adds 0x2710
    (10000) and writes the sum to the compare register at 0xE07E0004
-   (c00495e0-c00495ec); the hardware is meant to interrupt when the counter
-   reaches that value.  0xE07E0000 is the timer's interrupt enable (_enable
-   writes 1/0 there).  Modelling those three registers is what makes the
-   kernel's own idea of elapsed time line up with the interrupts it receives.
-   ★ We do NOT trigger off that deadline, and the reason is worth recording:
-   the same counter drives the kernel's `delay(ms)` busy-loop (c00a2690, which
-   multiplies its argument by 1000 -- so the counter is in MICROSECONDS).  The
-   emulator deliberately runs it fast (tick_scale 2000, i.e. 1 us per 1/2000
-   instruction) so those delays finish instantly.  At that rate a 10000 us
-   hardclock interval is FIVE instructions, which is an interrupt storm; but
-   slowing the counter to something realistic makes delay(1000) take 20M
-   instructions and the boot never finishes.  So the deadline is recorded but
-   the tick stays paced by clock_period instructions. */
-u32  clock_div = 10;
+   (c00495e0-c00495ec); the hardware interrupts when the counter reaches that
+   value.  0xE07E0000 is the timer's interrupt enable (_enable writes 1/0
+   there, for spl < 0x1b).
+   With a real counter we now DO trigger off that deadline (cpu.c), which is
+   what makes hz, elapsed time and itimer expiry agree.  The reason it could
+   not be done before is worth keeping: the same counter drives the kernel's
+   `delay(ms)` busy-loop at c00a2680, which multiplies its argument by 1000 --
+   so the counter is in MICROSECONDS -- and at tick_scale 2000 a 10000 us
+   hardclock interval is FIVE instructions, i.e. an interrupt storm.
+   The cost of the real rate is those delays becoming real: `ls --clock`
+   spends 78% of its instructions in delay's inner spin (c00a26c0), all of it
+   the `ex` Ethernet driver's two 10-second board-ready timeouts at c00b6470
+   and c00b66d4 (10 x delay(1000) each) for a board this emulator does not
+   model.  It costs ~20M instructions, under a second of host time, and needs
+   no stand-in -- so it is left honest.  --profile is how to re-check that. */
 u32  clock_deadline;
 /* Armed from reset: the compare register powers up at 0 and the free-running
    counter is already past it, so the first interrupt is due immediately.  The
@@ -95,6 +105,7 @@ u64 cmram_reads, cmram_writes;
 u8 **cmram_pages;                  /* dedicated CMRAM backing store */
 u32  watch_pc;
 int  dump_pchist;
+int  profile;
 int  vmprobe;          /* --vmprobe: count kernel VM/fault entries (step-1 probe) */
 int  vmexp;            /* --vmexp: at boot-complete, drive kernel VM funcs via RPC */
 u32  procexp_cluster;  /* logical cluster our real process runs in */
@@ -180,6 +191,12 @@ u64 xlat_faults;
 u32 last_fault_va, last_fault_pc;
 int clock_irq;
 u64 clock_period = 100000, next_clock;
+/* How often the level-triggered software-interrupt line may be re-asserted.
+   One hardclock interval is the natural floor: softclock has nothing new to do
+   more often than that, and a pending bit stays set until its handler runs, so
+   a shorter limit just re-enters the ISR on work it has already queued.
+   main() sizes it from the counter rate; 0 means "use clock_period". */
+u64 softint_period;
 /* Pragmatic SCSI path.  The SHA driver rings the controller doorbell and then
    blocks in tsleep waiting for a completion interrupt.  Our boot runs in the
    non-sleepable idle-thread context (Mach MP bring-up never hands off to a

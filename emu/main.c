@@ -19,7 +19,7 @@ int main(int argc, char **argv)
 
     u64 limit = 200000000ull;
     u32 sig = 'A';                     /* node EEPROM signature: 16MB + vmebus present */
-    int mode_sys = 0, identity_mode = 0, i = 1;
+    int mode_sys = 0, identity_mode = 0, i = 1, tickdiv_set = 0;
     const char *path = NULL;
 
     /* Options may appear anywhere, including after the binary name, so parse
@@ -38,6 +38,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--identity"))   identity_mode = 1;
         else if (!strcmp(argv[i], "--clock"))      clock_irq = 1;
         else if (!strncmp(argv[i], "--clock=", 8)) { clock_irq = 1; clock_period = strtoull(argv[i]+8,0,0); }
+        else if (!strncmp(argv[i], "--tickdiv=", 10))
+            { tick_div = (u32)strtoul(argv[i]+10,0,0); tickdiv_set = 1; }
         /* --- user-mode program launch --- */
         /* --shell: boot, then hand the terminal to the guest's own /bin/sh,
            run as a REAL nX process.  It used to mean the synthetic process
@@ -56,6 +58,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--kmsg"))       kmsgs = 1;
         else if (!strcmp(argv[i], "--scsitrace"))  scsi_trace = 1;
         else if (!strcmp(argv[i], "--pchist"))     dump_pchist = 1;
+        else if (!strcmp(argv[i], "--profile"))    profile = 1;
         else if (!strcmp(argv[i], "--vmprobe"))    vmprobe = 1;
         else if (!strcmp(argv[i], "--vmexp"))      vmexp = 1;
         else if (!strcmp(argv[i], "--ctxtrace"))   ctxtrace = 1;
@@ -138,6 +141,14 @@ int main(int argc, char **argv)
         dataphys = 1;
         if (!cfg_nodes) cfg_nodes = 1;
     }
+    /* --clock means a REAL microsecond counter (see timer_now).  It stays
+       opt-in precisely so the clock-off instruction counts stay bit-exact;
+       --tickdiv=N overrides the rate for experiments, including --tickdiv=0
+       to get the old fast counter back with interrupts still on. */
+    if (clock_irq && !tickdiv_set) tick_div = 1;
+    /* One hardclock interval (10000 us, hz = 100) expressed in instructions. */
+    if (!softint_period)
+        softint_period = tick_div ? 10000ull * tick_div : clock_period;
     if (nwords) path = words[0];
     if (!path) {
         fprintf(stderr,

@@ -92,6 +92,11 @@ int run_sys(const char *path, u64 limit, u32 sig)
     static u32 pchist[PCH_N]; static unsigned pchpos = 0;
     while (cpu.count < limit) {
         pchist[pchpos++ & (PCH_N - 1)] = cpu.pc;
+        /* --profile: where does the time actually GO?  --pchist keeps the last
+           64k PCs and --wtrace a straight line from a trigger; neither answers
+           "which loop is eating the run", which is exactly the question when
+           hunting busy-waits that the counter rate used to hide. */
+        if (profile) prof_bucket(cpu.pc);
         /* derail catcher: kernel boot stays in kernel space (>=0xC0000000);
            a fetch below it means a bad jump -- report the last kernel pc.
            Exempt genuine user-mode execution (PSR bit31 clear), where a low PC
@@ -461,6 +466,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
             for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
             putchar('\n');
         }
+    if (profile) prof_report();
     if (vmprobe) vm_probe_report();
     if (ctxtrace) ctx_report();
     if (clock_irq) printf("clock interrupts delivered: %llu (softint re-asserts %llu)\n",

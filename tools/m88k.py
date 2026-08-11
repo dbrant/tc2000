@@ -195,14 +195,15 @@ def decode(word, addr=0):
         fop = (word >> 11) & 0x1F
         if fop not in FPU:
             return None
-        # Operand-size fields.  TD is the LOW pair (bits 6-5) and T2 the high
-        # one (10-9) -- not the other way round.  With them swapped this
-        # printed `flt.sd` for what is really `flt.ds` (int->double) and
-        # `fcmp.dds` for a compare of two doubles, which sent one debugging
-        # session a long way down the wrong path.
+        # Operand-size fields: T1 at 10-9, T2 at 8-7, TD at 6-5.  TD being the
+        # LOW pair is the counter-intuitive part; with it in the wrong place
+        # this printed `flt.sd` for what is really `flt.ds` (int->double).
+        # T1 and T2 were then also swapped, which printed trek's `trnc.sd`
+        # (truncate a DOUBLE) as `trnc.ss` -- the unary ops take their operand
+        # from S2, so only T2 sizes it, and only a unary op reveals the swap.
         td = PREC.get((word >> 5) & 3, "?")
-        t1 = PREC.get((word >> 7) & 3, "?")
-        t2 = PREC.get((word >> 9) & 3, "?")
+        t2 = PREC.get((word >> 7) & 3, "?")
+        t1 = PREC.get((word >> 9) & 3, "?")
         S2 = word & 0x1F
         if fop in FPU_UNARY:
             return Insn(addr, word, "%s.%s%s" % (FPU[fop], td, t2),
