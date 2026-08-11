@@ -499,6 +499,23 @@ int console_syscall(u32 sysno, u32 tpc)
         if (!fd_is_console(a0)) return 0;
         u32 n = a2 > 4096 ? 4096 : a2;
         u8 tmp[4096];
+        /* ★ Pre-fault the destination BEFORE consuming any input.  This was the
+           one emulator-serviced buffer in this file that did not, and it lost
+           data as well as short-reading: `uwrite_mem` stops at the first
+           non-resident byte, so a read into a page the process has never
+           touched transferred NOTHING and returned 0 -- which stdio latches as
+           EOF -- while the line it had already taken off the host was gone.
+           /usr/games/arithmetic died on exactly that: it sbrk's an 8K stdio
+           buffer at 0xc000, asks its first question, does
+           read(0, 0xc000, 8192) into that untouched page, gets 0 back, sets
+           _IOEOF and then spins forever in _filbuf (0x5bc-0x628 -> 0xb48)
+           without ever issuing another syscall.  The answer you typed was
+           swallowed and nothing happened.
+           The order matters: fault first, and if a page is missing return 1 so
+           the whole syscall re-runs once the kernel has paged it in -- with the
+           input still unread.  Faulting the caller's whole buffer is also what
+           the real 4.3BSD read() does (useracc over the full length). */
+        if (n && ubuf_fault(a1, n, 1, tpc)) return 1;
         u32 got = !n ? 0
                 : tty_is_raw() ? con_read_raw(tmp, n)   /* a game: one key    */
                                : con_read_line(tmp, n); /* a shell: one line  */
