@@ -21,8 +21,17 @@ set -e
 cd "$(dirname "$0")"
 
 EMU=../emu
-TAPE=../tapeimage
 : "${EMCC:=emcc}"
+
+# Where the kernel and the tape's filesystem live.  vmunix turns up in either
+# of two places -- inside the extracted tape directory, or on its own beside the
+# image once that directory has been thrown away -- so look in both, the same
+# way the emulator itself derives the pair (see the candidate list in main.c).
+TAPE_IMG=../tapeimage.img
+VMUNIX=
+for c in ../tapeimage/vmunix ../vmunix; do
+    if [ -f "$c" ]; then VMUNIX=$c; break; fi
+done
 
 SRCS="globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c \
       usermode.c console.c proc.c sysmode.c main.c web.c"
@@ -78,7 +87,11 @@ echo "compiling nx88.wasm ..."
 # install target, is deliberately NOT here -- it is 256 MB and nothing in the
 # --shell demo touches it.  The emulator runs fine without one.)
 mkdir -p data
-for f in "$TAPE/vmunix:data/vmunix" "$TAPE.img:data/tapeimage.img"; do
+if [ -z "$VMUNIX" ]; then
+    echo "MISSING: no vmunix at ../tapeimage/vmunix or ../vmunix" >&2
+    exit 1
+fi
+for f in "$VMUNIX:data/vmunix" "$TAPE_IMG:data/tapeimage.img"; do
     src=${f%:*}; dst=${f#*:}
     if [ ! -f "$src" ]; then
         echo "MISSING: $src -- extract the tape first (see emu/BOOT.md)" >&2

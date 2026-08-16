@@ -29,19 +29,26 @@ It also [runs in a browser](web/).
 
 ## Quick start
 
-You need the tape image (`tapeimage/vmunix` and `tapeimage.img`), which is data,
-not code, and is not in this repository.
+You need the dumped tape image (`tapeimage.img`) and the `vmunix` executable
+extracted from it (not included in this repo).
+
+Put them side by side and run, from the repository root:
 
 ```sh
-cd emu
-./build.sh                                      # any C99 compiler; see below
-./nx88.exe sys ../tapeimage/vmunix --shell --kmsg
+./emu/build.sh                                  # any C compiler; see below
+./emu/nx88.exe sys ./vmunix --shell --kmsg
 ```
 
 `--shell` boots the kernel and hands your terminal to `/bin/sh` off the 1989
 tape; `--kmsg` shows the kernel's own console log. The kernel reaches a mounted
 root in about 3.7 million emulated instructions, which at ~25 million
 instructions/second is a fraction of a second.
+
+The tape image is located from the kernel's path, so `--tape=` is usually
+unnecessary: `vmunix` beside `tapeimage.img` works, and so does the extracted
+`<dir>/vmunix` next to its sibling `<dir>.img`. If neither is found, every disk
+read returns zeros and the kernel gets as far as
+`panic: vfs_mountroot: cannot mount root`.
 
 ```
 # ls /bin
@@ -139,9 +146,9 @@ nx88 user <binary> [args]       # run one m88k a.out with no kernel at all
 By default the emulator says **nothing**. What you see is what the machine said:
 
 ```sh
-./nx88.exe sys ../tapeimage/vmunix --shell           # the guest only
-./nx88.exe sys ../tapeimage/vmunix --shell --kmsg    # + the kernel's log
-./nx88.exe sys ../tapeimage/vmunix --shell --debug   # + the emulator's commentary
+./nx88.exe sys ./vmunix --shell           # the guest only
+./nx88.exe sys ./vmunix --shell --kmsg    # + the kernel's log
+./nx88.exe sys ./vmunix --shell --debug   # + the emulator's commentary
 ```
 
 `--debug` unlocks the load map, the synthetic boot tables, the process
@@ -275,11 +282,10 @@ emu/        the emulator, in C — build.sh, Makefile, BOOT.md
 web/        the WebAssembly build and the embeddable page
 tools/      the Python archaeology: decoder, disassembler, a.out and
             stabs readers, syscall-table recovery, validation oracles
-tapeimage/  the extracted tape (not in git)
 ```
 
-The tape data — `tapeimage/`, `tapeimage.img`, `disk.img` and the recovered
-archives — is not in the repository.
+The tape data — `vmunix`, `tapeimage.img`, `disk.img` and all the recovered
+archives — are not in the repository.
 
 ## Status
 

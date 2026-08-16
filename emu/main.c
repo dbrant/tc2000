@@ -224,10 +224,9 @@ int main(int argc, char **argv)
         ileave_stub  = 1;
         realmm = !identity_mode;
         /* Open the root filesystem image (the tape's UFS) for disk reads.
-           If --tape wasn't given, derive it from the vmunix path: vmunix lives
-           at <tapedir>/vmunix and the tape image is its sibling <tapedir>.img
-           (e.g. .../tapeimage/vmunix -> .../tapeimage.img). */
-        static char derived[1024], gr[1024];
+           If --tape wasn't given, derive it from the vmunix path -- see the
+           candidate list below; two layouts are in use and both work. */
+        static char derived[2][1024], gr[1024];
         {   /* the extracted tape directory doubles as the guest's / for exec */
             size_t n = strlen(path);
             const char *b = path + n;
@@ -255,23 +254,52 @@ int main(int argc, char **argv)
                 uenvp[nuenvp++] = "SHELL=/bin/sh";
             }
         }
+        /* ★ Two layouts of kernel-plus-tape are in use, and a purely syntactic
+           rule can only serve one of them:
+
+               <dir>/vmunix   next to   <dir>.img         the extracted tape
+               <dir>/vmunix   next to   <dir>/tapeimage.img   vmunix kept beside
+                                                              the image itself
+
+           Only the first used to be derived, so moving vmunix to sit alongside
+           the image turned `sys ./vmunix' into a lookup for `..img' -- the
+           directory part of "./vmunix" is ".", plus ".img".  That opens
+           nothing, every disk read then returns zeros, and the failure surfaces
+           a long way from its cause as `panic: vfs_mountroot: cannot mount
+           root'.  So try both and take the first that is actually there. */
         if (!strcmp(root_img_path, "../tapeimage.img")) {
             size_t n = strlen(path);
             const char *base = path + n;
             while (base > path && base[-1] != '/' && base[-1] != '\\') base--;
             size_t dlen = (size_t)(base - path);   /* includes trailing slash */
-            if (dlen > 1 && dlen < sizeof derived - 8) {
-                memcpy(derived, path, dlen - 1);   /* drop the trailing slash */
-                strcpy(derived + dlen - 1, ".img");
-                root_img_path = derived;
+            int nc = 0;
+            if (dlen > 1 && dlen < sizeof derived[0] - 8) {       /* <dir>.img */
+                memcpy(derived[nc], path, dlen - 1);   /* drop trailing slash */
+                strcpy(derived[nc] + dlen - 1, ".img");
+                nc++;
+            }
+            if (dlen < sizeof derived[0] - 16) {      /* <dir>/tapeimage.img */
+                memcpy(derived[nc], path, dlen);
+                strcpy(derived[nc] + dlen, "tapeimage.img");
+                nc++;
+            }
+            for (int c = 0; c < nc; c++) {
+                FILE *probe = fopen(derived[c], "rb");
+                if (probe) { fclose(probe); root_img_path = derived[c]; break; }
+                if (c == 0) root_img_path = derived[0];   /* name one in the error */
             }
         }
         root_img = fopen(root_img_path, "rb");
         if (root_img)
             dbg("root image: %s (open)\n", root_img_path);
         else
-            fprintf(stderr, "root image: %s could not be opened (disk reads "
-                    "will return zeros) -- pass --tape=PATH\n", root_img_path);
+            /* Say what this is about to cause.  The kernel's own complaint
+               arrives thousands of instructions later and names nothing that
+               points back here. */
+            fprintf(stderr, "root image: %s could not be opened -- disk reads "
+                    "will return zeros and the kernel will panic with "
+                    "`vfs_mountroot: cannot mount root'.  Pass --tape=PATH.\n",
+                    root_img_path);
         /* SCSI disk (sd0) target -- read/write, must already exist */
         disk_img = fopen(disk_img_path, "r+b");
         if (disk_img) {

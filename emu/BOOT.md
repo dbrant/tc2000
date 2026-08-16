@@ -24,13 +24,23 @@ valid node-local physical address, so the boot loader's map is essentially ident
 ```sh
 export PATH="/c/msys64/ucrt64/bin:$PATH"
 ./build.sh                                         # or: make
-./nx88.exe sys <path-to>/tapeimage/vmunix          # root image auto-derived: <tapedir>.img
+./nx88.exe sys <path-to>/tapeimage/vmunix          # root image auto-derived, see below
 ```
 
 The emulator is split by theme across a dozen small `.c` files plus a shared
 `nx88.h`; see the header's top comment for the module map. All machine state
 and configuration flags live in `globals.c`; each other file holds one
 subsystem's behaviour.
+
+**Finding the root image.** Without `--tape=PATH` it is derived from the
+kernel's path, trying two layouts and taking the first that exists:
+`<dir>/vmunix` beside its sibling `<dir>.img` (the extracted tape), or
+`<dir>/vmunix` beside `<dir>/tapeimage.img` (vmunix kept next to the image once
+the extracted directory has been thrown away). Nothing else in the extracted
+tree is read from the host — the guest's filesystem comes out of the image —
+so `vmunix` and `tapeimage.img` are the only two files needed. If neither
+candidate opens, disk reads return zeros and the kernel panics a long way
+downstream with `vfs_mountroot: cannot mount root`.
 
 Defaults: the **real-memory model** (the default) with translation and EEPROM
 signature `'A'`.  `--identity` selects the superseded identity+fallback path.

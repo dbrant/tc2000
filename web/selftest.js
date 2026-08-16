@@ -63,11 +63,16 @@ const SCRIPT = [
     stderr: (b) => { if (b !== null) sink([b]); },
   });
 
-  /* Same two files, same paths, as the worker stages into MEMFS. */
-  const tape = path.join(__dirname, '..', 'tapeimage');
-  for (const [src, dst] of [[path.join(tape, 'vmunix'),            '/tapeimage/vmunix'],
-                            [path.join(__dirname, '..', 'tapeimage.img'), '/tapeimage.img']]) {
-    if (!fs.existsSync(src)) { console.error(`missing ${src}`); process.exit(2); }
+  /* The very files the page fetches, at the very paths the worker stages them
+     to.  Reading them out of data/ rather than hunting for the original tape
+     keeps this in step with build.sh -- which knows where vmunix actually is,
+     and can find it in more than one place. */
+  for (const [src, dst] of [[path.join(__dirname, 'data', 'vmunix'),        '/tapeimage/vmunix'],
+                            [path.join(__dirname, 'data', 'tapeimage.img'), '/tapeimage.img']]) {
+    if (!fs.existsSync(src)) {
+      console.error(`missing ${src} -- run ./build.sh first`);
+      process.exit(2);
+    }
     const dir = dst.slice(0, dst.lastIndexOf('/'));
     if (dir) try { Module.FS.mkdirTree(dir); } catch (e) { /* exists */ }
     Module.FS.writeFile(dst, new Uint8Array(fs.readFileSync(src)));
