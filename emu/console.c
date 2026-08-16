@@ -290,7 +290,19 @@ static void host_tty_mode(int raw)
     }
     if (raw) {
         struct termios t = host_tio_save;
-        t.c_lflag &= ~(ICANON | ECHO);
+        /* ★ The host must stop CHEWING THE INPUT, not just stop echoing it.
+           Clearing ICANON|ECHO alone left ICRNL on, so the host tty turned the
+           RETURN key's CR into LF before the emulator ever saw it -- and a guest
+           that asked for CBREAK with CRMOD *clear* (Emacs sets sg_flags 0x00c2:
+           CBREAK, no ECHO, no CRMOD) wants the raw CR.  Emacs binds CR to
+           `newline` and LF to `C-j`, which in *scratch* is eval-print-last-sexp,
+           so Enter silently evaluated instead of opening a line.
+           IXON matters just as much: with it set the host swallows C-s/C-q as
+           flow control, and C-s is emacs's incremental search.
+           ISIG is deliberately LEFT ON so C-c still kills the emulator itself --
+           the guest not seeing ^C is a known, separate gap. */
+        t.c_iflag &= ~(ICRNL | INLCR | IGNCR | IXON | IXANY | ISTRIP | BRKINT);
+        t.c_lflag &= ~(ICANON | ECHO | IEXTEN);
         t.c_cc[VMIN]  = 1;
         t.c_cc[VTIME] = 0;
         if (tcsetattr(0, TCSANOW, &t) == 0) host_tio_raw = 1;
@@ -327,6 +339,7 @@ static void con_idle_nap(void)
 #endif
 }
 
+static u32 con_std_buffered(void);
 static u32 con_input_avail(void)
 {
     u32 n = 0;
@@ -339,6 +352,7 @@ static u32 con_input_avail(void)
         if (con_csock == CON_BADSOCK) return n;
         fd = con_csock;
     } else {
+        n += con_std_buffered();          /* bytes we already pulled off fd 0 */
 #ifdef _WIN32
         return n ? n : 1;   /* no cheap poll for a Windows console handle */
 #else
@@ -356,6 +370,32 @@ static u32 con_input_avail(void)
 }
 static int con_input_ready(void) { return con_input_avail() != 0; }
 
+/* ★ The stdio console reads through OUR OWN buffer, not stdio's.
+   FIONREAD has to be exact, and stdio's buffer is invisible to it: one `fgetc`
+   pulls a whole burst of typing off the descriptor, so the kernel then reports
+   "nothing available" while the rest of the keystrokes sit in libc.  A guest
+   that trusts FIONREAD -- Emacs does -- stops reading and the tail of what you
+   typed is stranded until the next keypress shakes it loose.  Owning the buffer
+   makes `con_input_avail` able to count it. */
+#ifndef _WIN32
+static u8  con_std_buf[512];
+static u32 con_std_len, con_std_pos;
+static int con_std_getc(void)
+{
+    if (con_std_pos >= con_std_len) {
+        con_std_len = con_std_pos = 0;
+        ssize_t r = read(0, con_std_buf, sizeof con_std_buf);
+        if (r <= 0) return -1;
+        con_std_len = (u32)r;
+    }
+    return con_std_buf[con_std_pos++];
+}
+static u32 con_std_buffered(void) { return con_std_len - con_std_pos; }
+#else
+static int con_std_getc(void) { int c = fgetc(stdin); return c == EOF ? -1 : c; }
+static u32 con_std_buffered(void) { return 0; }
+#endif
+
 /* No line editing and no echo -- the read a game in CBREAK expects.  Blocks for
    the FIRST byte, then takes whatever else is ALREADY waiting, up to `max`.
    ★ That tail matters for Emacs and nothing else: a cursor key arrives as the
@@ -364,17 +404,34 @@ static int con_input_ready(void) { return con_input_avail() != 0; }
    time left it sitting in an unresolved ESC prefix, swallowing the keys that
    followed.  Games are unaffected -- they ask for exactly 1 byte, so the drain
    loop never runs. */
+/* ★ One RETURN is one keystroke.  A telnet client transmits it as CR NUL or
+   CR LF (RFC 854) -- a line-ending ENCODING, not two keys -- and delivering the
+   trailing byte raw handed the guest a spurious second keystroke: in Emacs's
+   *scratch* that is C-@ (set-mark) or C-j (eval-print-last-sexp) after every
+   Enter.  The cooked path has always absorbed it (con_cook_line); the raw path
+   has to as well.  A byte that is neither is pushed back untouched. */
+static int con_in_key(void)
+{
+    int b = con_use_sock ? con_in_byte() : con_std_getc();
+    if (b < 0) return -1;
+    if (b == '\r' && con_use_sock && con_input_ready()) {
+        int nx = con_in_byte();
+        if (nx >= 0 && nx != '\n' && nx != 0) con_pushback = nx;
+    }
+    return b;
+}
+
 static u32 con_read_raw(u8 *dst, u32 max)
 {
     con_ensure_client();
     if (!max) return 0;
-    int b = con_use_sock ? con_in_byte() : fgetc(stdin);
-    if (b < 0 || b == EOF) return 0;
+    int b = con_in_key();
+    if (b < 0) return 0;
     dst[0] = (u8)b;
     u32 n = 1;
     while (n < max && con_input_ready()) {
-        int c = con_use_sock ? con_in_byte() : fgetc(stdin);
-        if (c < 0 || c == EOF) break;
+        int c = con_in_key();
+        if (c < 0) break;
         dst[n++] = (u8)c;
     }
     return n;
@@ -386,8 +443,8 @@ static u32 con_read_line(u8 *dst, u32 max)
     if (con_use_sock) return con_sock_read(dst, max);
     u32 n = 0;                                        /* stdio: host tty already cooks it */
     while (n < max) {
-        int c = fgetc(stdin);
-        if (c == EOF) break;
+        int c = con_std_getc();
+        if (c < 0) break;
         dst[n++] = (u8)c;
         if (c == '\n') break;
     }
