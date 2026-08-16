@@ -236,6 +236,11 @@ extern int quiet_uproc;
 extern int interactive;
 extern int kmsgs;
 extern int debug;
+extern u8  *kernel_img;
+extern u32  kernel_img_len;
+extern const char *kernel_path;
+/* ffs.c -- read-only 4.3BSD FFS over a host-opened image. */
+int ffs_read_file(FILE *img, const char *path, u8 **buf, u32 *len);
 
 /* ★ EMULATOR COMMENTARY vs THE MACHINE'S OWN VOICE.
    Two quite different things used to share stdout.  What the GUEST says -- the

@@ -8,9 +8,9 @@
 # running nx88.exe holds a file lock there, so it is killed before linking, and
 # the telnet console needs winsock.  Neither applies on macOS/Linux.
 #
-# ffs.c is deliberately NOT in the link: its only consumer was --diskmount in
-# the synthetic process model, which is gone.  The file stays because it is
-# still the way to read disk.img from the host -- see the header in ffs.c.
+# ffs.c IS in the link again: it is what lets `sys tapeimage.img' boot the
+# kernel out of the image's own filesystem, so no separate host vmunix is
+# needed.  See its header, and looks_like_ffs in main.c.
 #
 # The binary keeps the name nx88.exe on every platform so the commands in
 # BOOT.md (and everyone's shell history) work unchanged on both machines.
@@ -31,7 +31,7 @@ case "$(uname -s)" in
 esac
 
 ${CC:-cc} -O2 -Wall -o nx88.exe \
-    globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c \
+    globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c ffs.c \
     usermode.c console.c proc.c sysmode.c main.c \
     $LIBS
 echo "built nx88.exe"

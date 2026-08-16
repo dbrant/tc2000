@@ -30,17 +30,16 @@ Then:
     ./build.sh                            # or:  ./build.sh --debug
 
 That compiles `emu/*.c` plus `emu/web.c` into `nx88.js` + `nx88.wasm` (~140 KB
-of wasm) and stages the two host files the emulator opens into `data/`:
+of wasm) and stages the one host file the emulator opens into `data/`:
 
 | file | what it is |
 |---|---|
-| `data/vmunix` | the kernel, loaded as an a.out — 1.2 MB |
-| `data/tapeimage.img` | the tape's UFS, read as the root filesystem — 7.5 MB |
+| `data/tapeimage.img` | the tape's filesystem — 7.5 MB. Mounted as root, *and* the kernel is read out of it (`/vmunix`), so there is nothing else to stage |
 
 `disk.img` is deliberately not staged. It is the 256 MB SCSI install target and
 nothing in the shell demo touches it; the emulator runs fine without one.
 
-Both are generated, along with `nx88.js`/`nx88.wasm`, and are gitignored.
+It is generated, along with `nx88.js`/`nx88.wasm`, and gitignored.
 
 ## Testing without a browser
 
@@ -86,8 +85,8 @@ machine.reboot();
 | option | default | |
 |---|---|---|
 | `mount` | *(required)* | element to take over |
-| `args` | `sys /tapeimage/vmunix --shell --kmsg` | the `nx88` command line, verbatim — every flag in `emu/BOOT.md` works |
-| `files` | kernel + tape | `[{path, url, label}]`, staged into the emulator's filesystem before it runs |
+| `args` | `sys /tapeimage.img --shell --kmsg` | the `nx88` command line, verbatim — every flag in `emu/BOOT.md` works |
+| `files` | the tape image | `[{path, url, label}]`, staged into the emulator's filesystem before it runs |
 | `base` | this script's directory | where `nx88.js`, `nx88-worker.js` and `data/` live |
 | `autostart` | `false` | skip the click-to-boot overlay |
 | `restartButton` | `true` | the status bar's Restart button; turn off if you supply your own chrome and call `reboot()` yourself |
@@ -101,7 +100,7 @@ kernel's own console output — the memory sizing, the VMEbus probe, `nX
 Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989`. The emulator's own
 commentary is off (that is `--debug`), so what the page shows is what the
 machine said. To run something other than the shell, say
-`sys /tapeimage/vmunix --uprog=/usr/games/snake --kmsg`.
+`sys /tapeimage.img --uprog=/usr/games/snake --kmsg`.
 
 ## Deploying
 
@@ -112,10 +111,10 @@ friends work as-is. `serve.py` exists only for local development; what it adds
 over `python -m http.server` is `application/wasm`, `no-store` so a rebuild is
 actually picked up, and Range requests for the 7 MB tape image.
 
-`file://` will not work: the page starts a Worker and fetches the images.
+`file://` will not work: the page starts a Worker and fetches the image.
 
-Serve the two files in `data/` with compression if you can. The tape image is
-mostly empty filesystem and gzips to a fraction of its size.
+Serve `data/tapeimage.img` with compression if you can — it is mostly empty
+filesystem and gzips to a fraction of its size.
 
 ---
 

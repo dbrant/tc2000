@@ -33,14 +33,16 @@
   const COLS = 80, ROWS = 24;
 
   const DEFAULTS = {
-    /* --kmsg is the point of the demo: it echoes the kernel's OWN console
+    /* One file: the tape image is a filesystem that CONTAINS the kernel, and
+       the emulator reads /vmunix out of it rather than being handed a separate
+       copy -- so there is nothing else to download.
+       --kmsg is the point of the demo: it echoes the kernel's OWN console
        output ("nX Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989",
        the memory sizing, the VMEbus probe) rather than only the emulator's
        commentary about it. */
-    args: 'sys /tapeimage/vmunix --shell --kmsg',
+    args: 'sys /tapeimage.img --shell --kmsg',
     files: [
-      { path: '/tapeimage/vmunix', url: 'data/vmunix',       label: 'kernel' },
-      { path: '/tapeimage.img',    url: 'data/tapeimage.img', label: 'install tape' },
+      { path: '/tapeimage.img', url: 'data/tapeimage.img', label: 'install tape' },
     ],
     autostart: false,
     fontSize: 15,

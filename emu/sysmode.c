@@ -33,7 +33,13 @@ void proc_table_dump(void)
 int run_sys(const char *path, u64 limit, u32 sig)
 {
     AOut a;
-    if (aout_load(path, &a)) return 1;
+    /* The kernel always comes out of the boot image's own filesystem; main.c
+       read it there and stopped if it could not. */
+    if (aout_load_mem(kernel_img, kernel_img_len, &a)) {
+        fprintf(stderr, "%s: the kernel inside this image is not ZMAGIC "
+                "(%08x)\n", path, a.magic);
+        return 1;
+    }
     sysmode = 1;
     force_sig_pc  = sig ? 0xC00A851Cu : 0;
     force_sig_val = sig;

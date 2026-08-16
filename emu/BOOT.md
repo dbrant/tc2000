@@ -24,7 +24,7 @@ valid node-local physical address, so the boot loader's map is essentially ident
 ```sh
 export PATH="/c/msys64/ucrt64/bin:$PATH"
 ./build.sh                                         # or: make
-./nx88.exe sys <path-to>/tapeimage/vmunix          # root image auto-derived, see below
+./nx88.exe sys <path-to>/tapeimage.img             # the image IS the machine
 ```
 
 The emulator is split by theme across a dozen small `.c` files plus a shared
@@ -32,22 +32,34 @@ The emulator is split by theme across a dozen small `.c` files plus a shared
 and configuration flags live in `globals.c`; each other file holds one
 subsystem's behaviour.
 
-**Finding the root image.** Without `--tape=PATH` it is derived from the
-kernel's path, trying two layouts and taking the first that exists:
-`<dir>/vmunix` beside its sibling `<dir>.img` (the extracted tape), or
-`<dir>/vmunix` beside `<dir>/tapeimage.img` (vmunix kept next to the image once
-the extracted directory has been thrown away). Nothing else in the extracted
-tree is read from the host — the guest's filesystem comes out of the image —
-so `vmunix` and `tapeimage.img` are the only two files needed. If neither
-candidate opens, disk reads return zeros and the kernel panics a long way
-downstream with `vfs_mountroot: cannot mount root`.
+### One file: `sys tapeimage.img`
+
+The tape image is a filesystem, and `/vmunix` is a file inside it — so the image
+alone is a complete machine:
+
+```sh
+./nx88.exe sys <path-to>/tapeimage.img --shell --kmsg
+```
+
+The emulator reads the kernel out of the image through `ffs.c` and mounts that
+same image as root. `--kernel=PATH` selects a different kernel from within it;
+`--tape=PATH` mounts a different filesystem as root than the one booted from.
+
+### A note on MSYS2 and guest paths
+
+Flags whose value is an absolute *guest* path — `--uprog=/bin/date`,
+`--kernel=/vmunix` — are rewritten by MSYS2's argument conversion into Windows
+paths before the emulator ever sees them, which silently changes what runs.
+Under MSYS2 bash, prefix the command with `MSYS2_ARG_CONV_EXCL='*'` (and then
+give host paths in Windows form, since those genuinely do need converting).
+PowerShell and cmd are unaffected.
 
 Defaults: the **real-memory model** (the default) with translation and EEPROM
 signature `'A'`.  `--identity` selects the superseded identity+fallback path.
 Useful flags: `--scsi` (configure the SCSI disk / enable the sd0 path),
 `--scsitrace`, `--clock`, `--pchist` (dump the last 64K PCs at halt — the tool
 that cracked several blockers), `--watch=PC`, `--nodes=N`, and the two image
-paths `--tape=PATH` (root filesystem / tape UFS; default `<vmunix-dir>.img`) and
+paths `--tape=PATH` (mount a different root than the booted image) and
 `--disk=PATH` (SCSI sd0 install target; default `disk.img`).
 
 ### What reaches the terminal — `--debug`
@@ -63,16 +75,16 @@ kernel's log completely.
 All of the latter now goes through `dbg()` (see `nx88.h`) and needs `--debug`:
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage/vmunix --shell           # the machine only
-./nx88.exe sys <path-to>/tapeimage/vmunix --shell --kmsg    # + the kernel's log
-./nx88.exe sys <path-to>/tapeimage/vmunix --shell --debug   # + everything else
+./nx88.exe sys <path-to>/tapeimage.img --shell           # the machine only
+./nx88.exe sys <path-to>/tapeimage.img --shell --kmsg    # + the kernel's log
+./nx88.exe sys <path-to>/tapeimage.img --shell --debug   # + everything else
 ```
 
 Every *other* diagnostic flag (`--trace-traps`, `--wmem=`, `--pwatch=`,
 `--profile`, `--pchist`, `--vmprobe`, `--ctxtrace`, `--scsitrace`, `--watch=`,
 `--uprog=`, `--handload=`, `-v`, …) switches `--debug` on for itself, so no
 command line here prints less than it used to; what changed is the bare
-`sys vmunix` and `--shell` runs. `--quiet` switches it back off, and options are
+`sys <image>` and `--shell` runs. `--quiet` switches it back off, and options are
 read left to right, so the last one wins. Genuine failures — a tape image that
 will not open, a bad a.out — are not commentary and stay on stderr regardless.
 
@@ -84,7 +96,7 @@ character passes through, rather than reconstructing messages from format
 strings. Combines with anything:
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage/vmunix --shell --kmsg
+./nx88.exe sys <path-to>/tapeimage.img --shell --kmsg
 ```
 
 ```
@@ -114,7 +126,7 @@ console and syslog alike.
 ### An interactive shell
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage/vmunix --shell
+./nx88.exe sys <path-to>/tapeimage.img --shell
 ```
 
 boots the kernel and hands your terminal to `/bin/sh` off the 1989 tape:
@@ -147,7 +159,7 @@ the interactive session is served on a loopback TCP socket at `127.0.0.1:N` for 
 VT100/telnet client to attach to.
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage/vmunix --shell --console-port=2323 --kmsg
+./nx88.exe sys <path-to>/tapeimage.img --shell --console-port=2323 --kmsg
 # ...boot log on stdout... then in another window:
 telnet 127.0.0.1 2323        # or: nc 127.0.0.1 2323, or PuTTY (Raw/Telnet)
 ```

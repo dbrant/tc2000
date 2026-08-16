@@ -22,7 +22,7 @@ const verbose = process.argv.includes('-v');
    the other side of the --debug gate gets tested:
      NX_ARGS='sys /tapeimage/vmunix --shell --kmsg --debug' node selftest.js
    flips the "emulator stayed quiet" checks into "the commentary came back". */
-const ARGS = process.env.NX_ARGS || 'sys /tapeimage/vmunix --shell --kmsg';
+const ARGS = process.env.NX_ARGS || 'sys /tapeimage.img --shell --kmsg';
 const emuDebug = /(^|\s)--debug(\s|$)/.test(ARGS);
 
 /* The session, as the terminal would see it. */
@@ -63,12 +63,10 @@ const SCRIPT = [
     stderr: (b) => { if (b !== null) sink([b]); },
   });
 
-  /* The very files the page fetches, at the very paths the worker stages them
-     to.  Reading them out of data/ rather than hunting for the original tape
-     keeps this in step with build.sh -- which knows where vmunix actually is,
-     and can find it in more than one place. */
-  for (const [src, dst] of [[path.join(__dirname, 'data', 'vmunix'),        '/tapeimage/vmunix'],
-                            [path.join(__dirname, 'data', 'tapeimage.img'), '/tapeimage.img']]) {
+  /* The very file the page fetches, at the very path the worker stages it to.
+     Just the one: the kernel lives inside this filesystem and the emulator
+     reads it out of there. */
+  for (const [src, dst] of [[path.join(__dirname, 'data', 'tapeimage.img'), '/tapeimage.img']]) {
     if (!fs.existsSync(src)) {
       console.error(`missing ${src} -- run ./build.sh first`);
       process.exit(2);

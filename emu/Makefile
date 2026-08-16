@@ -10,7 +10,7 @@ CFLAGS  := -O2 -Wall
 LDFLAGS :=
 LDLIBS  :=
 
-SRCS := globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c \
+SRCS := globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c ffs.c \
         usermode.c console.c proc.c sysmode.c main.c
 OBJS := $(SRCS:.c=.o)
 HDR  := nx88.h

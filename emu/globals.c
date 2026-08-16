@@ -138,6 +138,11 @@ int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 int  interactive;      /* --shell: hand the terminal to /bin/sh */
 int  kmsgs;            /* --kmsg: echo the kernel's console output */
 int  debug;            /* --debug: let the EMULATOR's own commentary out */
+/* The kernel, when it was read out of the boot image's own filesystem rather
+   than from a host file -- see looks_like_ffs in main.c. */
+u8  *kernel_img;
+u32  kernel_img_len;
+const char *kernel_path;   /* --kernel=PATH: which kernel, inside the image */
 u32  brk_watch_pc, brk_watch_arg;
 u32  last_sleep_chan, last_sleep_from;
 u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */
@@ -208,9 +213,11 @@ int sha_sync = 1;
 int biowait_sync = 1;
 int skip_synchrtc = 1;         /* skip meaningless cross-node RTC sync */
 /* Root filesystem backing.  During install the root is the tape's UFS image
-   (tapeimage.img, superblock at byte 0x2000); the blank disk.img is the write
-   target.  Reads issued by the buffer cache are satisfied from this file. */
-const char *root_img_path = "../tapeimage.img";
+   (superblock at byte 0x2000); the blank disk.img is the write target.  Reads
+   issued by the buffer cache are satisfied from this file.
+   NULL means "the image we booted" -- main.c fills it in; --tape=PATH sets it
+   to something else, which is the only way root and boot media differ. */
+const char *root_img_path;
 FILE *root_img;
 /* SCSI disk (sd0 = the install target) backing.  The SHA target-0 model routes
    READ/WRITE block I/O here; blank at first, newfs populates it. */

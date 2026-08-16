@@ -1,21 +1,21 @@
-/* Read-only 4.3BSD FFS reader over disk.img.
+/* Read-only 4.3BSD FFS reader, over any image the host can open.
  *
- * ★ NOT LINKED INTO THE EMULATOR any more.  It existed to serve --diskmount in
- * the SYNTHETIC process model, whose execve loaded a.out images from host files
- * and so could not see anything the guest had mounted.  That model is gone: the
- * kernel's own execve reads the disk through its own buffer cache, so a real
- * in-guest `mount /dev/sd0b /mnt` makes /mnt/bin/prog directly executable and
- * no host-side FFS reader is needed.
+ * It was written to serve --diskmount in the synthetic process model, and when
+ * that model went away it spent a while unlinked, kept only because it was the
+ * one way to browse disk.img from the host.  It is back in the build for a
+ * better reason: the tape image is a filesystem that CONTAINS THE KERNEL, so
+ * with a reader for it the emulator needs no separate vmunix on the host at all
+ * (see the `looks_like_ffs' path in main.c).  Verified on both images -- the
+ * /vmunix read out of tapeimage.img is byte-for-byte the file that used to sit
+ * beside it.
  *
- * It stays because it is still the only way to browse disk.img FROM THE HOST.
- * To use it, compile a throwaway that #includes this file (the namei/read_ino
- * helpers are static) and link everything except ffs.c.  ffs_read_file() takes
- * only REGULAR files; directories return -1 by design.
+ * ffs_read_file() takes only REGULAR files; directories return -1 by design.
  *
  * Superblock -> name lookup -> inode -> data blocks.  Big-endian; the on-disk
  * field offsets were pinned against a disk.img the guest itself newfs'd and
- * populated (verified by reading a known binary back byte-for-byte).  Read-only:
- * no allocation, no bitmap or cylinder-group summary maintenance. */
+ * populated (verified by reading a known binary back byte-for-byte), and they
+ * read BBN's own 1989 tape image unchanged -- same newfs, same layout.
+ * Read-only: no allocation, no bitmap or cylinder-group summary maintenance. */
 #include "nx88.h"
 
 #define FFS_SBOFF        8192      /* superblock byte offset (BBSIZE)          */
@@ -31,26 +31,30 @@ typedef struct {
 } FfsSb;
 
 static FfsSb sb;
+/* The image the current call is reading.  There are two in play -- the tape and
+   the SCSI disk -- and the parsed superblock is cached, so switching images has
+   to invalidate it or the second one is read with the first one's geometry. */
+static FILE *ffs_fp;
 
-/* --- raw disk.img access (each op seeks, so sharing the FILE* is safe) --- */
+/* --- raw image access (each op seeks, so sharing the FILE* is safe) --- */
 static u32 dread32(u32 byteoff)
 {
     u8 b[4];
-    if (fseek(disk_img, (long)byteoff, SEEK_SET) != 0) return 0;
-    if (fread(b, 1, 4, disk_img) != 4) return 0;
+    if (fseek(ffs_fp, (long)byteoff, SEEK_SET) != 0) return 0;
+    if (fread(b, 1, 4, ffs_fp) != 4) return 0;
     return be32(b);
 }
 static void dread(u32 byteoff, u8 *dst, u32 n)
 {
-    if (fseek(disk_img, (long)byteoff, SEEK_SET) != 0) { memset(dst, 0, n); return; }
-    size_t g = fread(dst, 1, n, disk_img);
+    if (fseek(ffs_fp, (long)byteoff, SEEK_SET) != 0) { memset(dst, 0, n); return; }
+    size_t g = fread(dst, 1, n, ffs_fp);
     if (g < n) memset(dst + g, 0, n - g);
 }
 
 static int ffs_init(void)
 {
     if (sb.ok) return 0;
-    if (!disk_img) return -1;
+    if (!ffs_fp) return -1;
     if (dread32(FFS_SBOFF + 0x55c) != FFS_MAGIC) return -1;
     sb.iblkno   = dread32(FFS_SBOFF + 0x10);
     sb.cgoffset = dread32(FFS_SBOFF + 0x18);
@@ -156,10 +160,12 @@ static int namei(const char *path, u32 *ino_out)
     return 0;
 }
 
-/* Public: read a regular file's bytes from disk.img's FFS.  Caller frees *buf.
+/* Public: read a regular file's bytes out of `img`'s FFS.  Caller frees *buf.
    Returns 0 on success, -1 if absent, not a regular file, or unreadable. */
-int ffs_read_file(const char *path, u8 **buf, u32 *len)
+int ffs_read_file(FILE *img, const char *path, u8 **buf, u32 *len)
 {
+    if (!img) return -1;
+    if (img != ffs_fp) { ffs_fp = img; sb.ok = 0; }   /* new image, new geometry */
     if (ffs_init()) return -1;
     u32 ino, mode;
     if (namei(path, &ino)) return -1;

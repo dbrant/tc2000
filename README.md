@@ -29,26 +29,30 @@ It also [runs in a browser](web/).
 
 ## Quick start
 
-You need the dumped tape image (`tapeimage.img`) and the `vmunix` executable
-extracted from it (not included in this repo).
-
-Put them side by side and run, from the repository root:
+You need exactly one file that is data, not code, and is not in this repo: the
+dumped tape image, `tapeimage.img`.
 
 ```sh
 ./emu/build.sh                                  # any C compiler; see below
-./emu/nx88.exe sys ./vmunix --shell --kmsg
+./emu/nx88.exe sys tapeimage.img --shell --kmsg
 ```
+
+That is the whole machine in one file. The image is a 4.3BSD filesystem and the
+kernel is a file inside it, so the emulator reads `/vmunix` out of the image and
+then mounts that same image as root — there is no separate kernel to keep
+alongside it. `--kernel=PATH` boots a different one from within the image.
 
 `--shell` boots the kernel and hands your terminal to `/bin/sh` off the 1989
 tape; `--kmsg` shows the kernel's own console log. The kernel reaches a mounted
 root in about 3.7 million emulated instructions, which at ~25 million
 instructions/second is a fraction of a second.
 
-The tape image is located from the kernel's path, so `--tape=` is usually
-unnecessary: `vmunix` beside `tapeimage.img` works, and so does the extracted
-`<dir>/vmunix` next to its sibling `<dir>.img`. If neither is found, every disk
-read returns zeros and the kernel gets as far as
-`panic: vfs_mountroot: cannot mount root`.
+A standalone kernel file is not accepted: the image already carries a
+byte-identical copy, so the only thing a separate one added was a root
+filesystem that had to be *guessed* from the kernel's path — and guessed wrong
+whenever the two were not laid out as expected, failing thousands of
+instructions later as `cannot mount root`. `--tape=PATH` mounts a different
+filesystem as root than the one booted from.
 
 ```
 # ls /bin
@@ -137,7 +141,7 @@ four months after the TC2000 was announced.
 Two modes:
 
 ```sh
-nx88 sys  <vmunix> [flags]      # boot the kernel
+nx88 sys  <image>  [flags]      # boot a filesystem image
 nx88 user <binary> [args]       # run one m88k a.out with no kernel at all
 ```
 
@@ -146,9 +150,9 @@ nx88 user <binary> [args]       # run one m88k a.out with no kernel at all
 By default the emulator says **nothing**. What you see is what the machine said:
 
 ```sh
-./nx88.exe sys ./vmunix --shell           # the guest only
-./nx88.exe sys ./vmunix --shell --kmsg    # + the kernel's log
-./nx88.exe sys ./vmunix --shell --debug   # + the emulator's commentary
+./nx88.exe sys tapeimage.img --shell           # the guest only
+./nx88.exe sys tapeimage.img --shell --kmsg    # + the kernel's log
+./nx88.exe sys tapeimage.img --shell --debug   # + the emulator's commentary
 ```
 
 `--debug` unlocks the load map, the synthetic boot tables, the process
@@ -173,7 +177,8 @@ the kernel create them.
 
 | flag | |
 |---|---|
-| `--tape=PATH` | root filesystem image; defaults to `<vmunix-dir>.img` |
+| `--tape=PATH` | mount a different filesystem as root than the one booted from |
+| `--kernel=PATH` | boot a different kernel from inside the image (default `/vmunix`) |
 | `--disk=PATH` | SCSI `sd0` install target (default `disk.img`) |
 | `--hostfile=PATH` | expose a host file to the guest at `/hosttar`, read-only — so the guest can `tar xpf /hosttar` an archive that lives on no guest filesystem |
 | `--nodes=N` | how many nodes the machine has |
@@ -284,7 +289,7 @@ tools/      the Python archaeology: decoder, disassembler, a.out and
             stabs readers, syscall-table recovery, validation oracles
 ```
 
-The tape data — `vmunix`, `tapeimage.img`, `disk.img` and all the recovered
+The tape data — `tapeimage.img`, `disk.img` and all the recovered
 archives — are not in the repository.
 
 ## Status

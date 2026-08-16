@@ -9,11 +9,12 @@
 #
 # Everything this writes is generated and gitignored:
 #   nx88.js  nx88.wasm            the emulator
-#   data/vmunix  data/tapeimage.img   staged copies of the tape, fetched by
-#                                     the worker at boot time
+#   data/tapeimage.img            the tape, fetched by the worker at boot;
+#                                 the kernel is read out of it, not staged
 #
 # The source list is emu/build.sh's plus web.c (the browser entry point).
-# ffs.c is not in either -- see the header in ffs.c.  No winsock: console.c's
+# ffs.c is in both -- it is what reads the kernel out of the tape image.
+# No winsock: console.c's
 # socket transport compiles out entirely under __EMSCRIPTEN__, replaced by the
 # postMessage one; the note at the top of that file explains why the browser
 # gets the SOCKET console's line discipline and not the stdio console's.
@@ -23,17 +24,13 @@ cd "$(dirname "$0")"
 EMU=../emu
 : "${EMCC:=emcc}"
 
-# Where the kernel and the tape's filesystem live.  vmunix turns up in either
-# of two places -- inside the extracted tape directory, or on its own beside the
-# image once that directory has been thrown away -- so look in both, the same
-# way the emulator itself derives the pair (see the candidate list in main.c).
+# The ONE file the page needs.  The tape image is a filesystem that contains
+# the kernel, and the emulator reads it out of there (looks_like_ffs in
+# main.c), so there is no vmunix to stage alongside it -- 1.2 MB less to
+# download, and one less thing to keep in step.
 TAPE_IMG=../tapeimage.img
-VMUNIX=
-for c in ../tapeimage/vmunix ../vmunix; do
-    if [ -f "$c" ]; then VMUNIX=$c; break; fi
-done
 
-SRCS="globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c \
+SRCS="globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c ffs.c \
       usermode.c console.c proc.c sysmode.c main.c web.c"
 
 debug=0
@@ -82,29 +79,23 @@ echo "compiling nx88.wasm ..."
 # shellcheck disable=SC2086
 (cd "$EMU" && exec $EMCC $CFLAGS $SRCS -o ../web/nx88.js $LINKFLAGS)
 
-# Stage the two host files the emulator opens: the kernel it loads as an a.out,
-# and the tape's UFS it reads as the root filesystem.  (disk.img, the SCSI
-# install target, is deliberately NOT here -- it is 256 MB and nothing in the
-# --shell demo touches it.  The emulator runs fine without one.)
+# Stage the one host file the emulator opens: the tape's UFS, which it mounts as
+# root AND reads the kernel out of.  (disk.img, the SCSI install target, is
+# deliberately NOT here -- it is 256 MB and nothing in the --shell demo touches
+# it.  The emulator runs fine without one.)
 mkdir -p data
-if [ -z "$VMUNIX" ]; then
-    echo "MISSING: no vmunix at ../tapeimage/vmunix or ../vmunix" >&2
+rm -f data/vmunix                 # from before the kernel came out of the image
+if [ ! -f "$TAPE_IMG" ]; then
+    echo "MISSING: $TAPE_IMG -- see emu/BOOT.md" >&2
     exit 1
 fi
-for f in "$VMUNIX:data/vmunix" "$TAPE_IMG:data/tapeimage.img"; do
-    src=${f%:*}; dst=${f#*:}
-    if [ ! -f "$src" ]; then
-        echo "MISSING: $src -- extract the tape first (see emu/BOOT.md)" >&2
-        exit 1
-    fi
-    if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
-        echo "staging $src -> $dst"
-        cp "$src" "$dst"
-    fi
-done
+if [ ! -f data/tapeimage.img ] || [ "$TAPE_IMG" -nt data/tapeimage.img ]; then
+    echo "staging $TAPE_IMG -> data/tapeimage.img"
+    cp "$TAPE_IMG" data/tapeimage.img
+fi
 
 echo
 echo "built:"
-ls -l nx88.js nx88.wasm data/vmunix data/tapeimage.img | awk '{printf "  %10s  %s\n", $5, $9}'
+ls -l nx88.js nx88.wasm data/tapeimage.img | awk '{printf "  %10s  %s\n", $5, $9}'
 echo
 echo "now run ./serve.py and open http://localhost:8000/"

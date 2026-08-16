@@ -32,6 +32,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--sig=", 6))   sig = (u32)(u8)argv[i][6];
         else if (!strncmp(argv[i], "--nodes=", 8)) cfg_nodes = (u32)strtoul(argv[i]+8,0,0);
         else if (!strncmp(argv[i], "--tape=", 7))  root_img_path = argv[i]+7;
+        else if (!strncmp(argv[i], "--kernel=", 9)) kernel_path = argv[i]+9;
         else if (!strncmp(argv[i], "--disk=", 7))  disk_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--hostfile=", 11)) hostfile_path = argv[i]+11;
         else if (!strcmp(argv[i], "--scsi"))       sha_desc_clear = 0x14;
@@ -165,12 +166,18 @@ int main(int argc, char **argv)
     if (!path) {
         fprintf(stderr,
                 "usage: nx88 user <binary> [args...] [-v] [--limit=N]\n"
-                "       nx88 sys  <vmunix> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
-                "                          [--debug] [--uprog=PATH]\n"
-                "                          [--handload=HOSTPATH]\n"
-                "                          [--nodes=N] [--identity]\n"
-                "                          [--tape=PATH] [--disk=PATH]\n"
-                "                          [--console-port=N]\n"
+                "       nx88 sys  <image> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
+                "                         [--debug] [--kernel=PATH] [--uprog=PATH]\n"
+                "                         [--handload=HOSTPATH]\n"
+                "                         [--nodes=N] [--identity]\n"
+                "                         [--tape=PATH] [--disk=PATH]\n"
+                "                         [--console-port=N]\n"
+                "  <image>      a 4.3BSD filesystem image to boot -- e.g. the\n"
+                "               install tape.  Its own /vmunix is the kernel and\n"
+                "               it is mounted as root; there is nothing else to\n"
+                "               supply.  A standalone kernel file is not accepted.\n"
+                "  --kernel=PATH  boot a different kernel from inside the image\n"
+                "               (default /vmunix)\n"
                 "  --debug      let the EMULATOR's own commentary out: the load\n"
                 "               map, the synthetic boot tables, the proc\n"
                 "               experiment, [kfall]/[halt]/[PANIC], the closing\n"
@@ -180,8 +187,8 @@ int main(int argc, char **argv)
                 "               output.  Every other diagnostic flag below turns\n"
                 "               this on for itself; --quiet turns it back off.\n"
                 "  --kmsg       echo the kernel's own console log, prefixed [nx]\n"
-                "  --tape=PATH  root filesystem image (the tape's UFS; default:\n"
-                "               <vmunix-dir>.img, e.g. .../tapeimage.img)\n"
+                "  --tape=PATH  mount a DIFFERENT filesystem as root than the\n"
+                "               one booted from (default: the booted image)\n"
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
                 "  --hostfile=PATH  expose a host file to the guest at /hosttar\n"
                 "               read-only (e.g. `tar xpf /hosttar` in the guest)\n"
@@ -223,11 +230,10 @@ int main(int argc, char **argv)
         translate_on = 1;
         ileave_stub  = 1;
         realmm = !identity_mode;
-        /* Open the root filesystem image (the tape's UFS) for disk reads.
-           If --tape wasn't given, derive it from the vmunix path -- see the
-           candidate list below; two layouts are in use and both work. */
-        static char derived[2][1024], gr[1024];
-        {   /* the extracted tape directory doubles as the guest's / for exec */
+        /* The directory the boot image sits in, which is what the legacy
+           host-side loader (bare --procexp) resolves its a.out against. */
+        static char gr[1024];
+        {
             size_t n = strlen(path);
             const char *b = path + n;
             while (b > path && b[-1] != '/' && b[-1] != '\\') b--;
@@ -254,52 +260,52 @@ int main(int argc, char **argv)
                 uenvp[nuenvp++] = "SHELL=/bin/sh";
             }
         }
-        /* ★ Two layouts of kernel-plus-tape are in use, and a purely syntactic
-           rule can only serve one of them:
+        /* ★ THE IMAGE ALREADY CONTAINS THE KERNEL, so it can be the only file.
+           `sys tapeimage.img' boots the /vmunix inside the tape's own
+           filesystem and mounts that same filesystem as root -- one file, no
+           host-side copy of a kernel that the image already carries (verified
+           identical to the extracted one, byte for byte).  --kernel=PATH picks
+           a different one out of the image.
 
-               <dir>/vmunix   next to   <dir>.img         the extracted tape
-               <dir>/vmunix   next to   <dir>/tapeimage.img   vmunix kept beside
-                                                              the image itself
-
-           Only the first used to be derived, so moving vmunix to sit alongside
-           the image turned `sys ./vmunix' into a lookup for `..img' -- the
-           directory part of "./vmunix" is ".", plus ".img".  That opens
-           nothing, every disk read then returns zeros, and the failure surfaces
-           a long way from its cause as `panic: vfs_mountroot: cannot mount
-           root'.  So try both and take the first that is actually there. */
-        if (!strcmp(root_img_path, "../tapeimage.img")) {
-            size_t n = strlen(path);
-            const char *base = path + n;
-            while (base > path && base[-1] != '/' && base[-1] != '\\') base--;
-            size_t dlen = (size_t)(base - path);   /* includes trailing slash */
-            int nc = 0;
-            if (dlen > 1 && dlen < sizeof derived[0] - 8) {       /* <dir>.img */
-                memcpy(derived[nc], path, dlen - 1);   /* drop trailing slash */
-                strcpy(derived[nc] + dlen - 1, ".img");
-                nc++;
+           Loading a standalone vmunix from the host used to be the only way in,
+           and is deliberately gone.  It bought nothing -- the image already
+           carries a byte-identical copy of that kernel, and booting either way
+           was instruction-identical -- while costing a whole class of
+           confusion: the root filesystem then had to be GUESSED from the
+           kernel's path, by rules that silently produced nonsense when the two
+           were not laid out the way the guess expected, and the failure
+           surfaced thousands of instructions later as `cannot mount root'.
+           There is nothing left to guess. */
+        {
+            FILE *ki = fopen(path, "rb");
+            const char *kp = kernel_path ? kernel_path : "/vmunix";
+            if (!ki) { perror(path); return 1; }
+            if (ffs_read_file(ki, kp, &kernel_img, &kernel_img_len)) {
+                fclose(ki);
+                fprintf(stderr, "%s: not a bootable image -- expected a 4.3BSD "
+                        "filesystem containing %s\n"
+                        "  (a standalone kernel file is not accepted; boot the "
+                        "image that contains it)\n", path, kp);
+                return 1;
             }
-            if (dlen < sizeof derived[0] - 16) {      /* <dir>/tapeimage.img */
-                memcpy(derived[nc], path, dlen);
-                strcpy(derived[nc] + dlen, "tapeimage.img");
-                nc++;
-            }
-            for (int c = 0; c < nc; c++) {
-                FILE *probe = fopen(derived[c], "rb");
-                if (probe) { fclose(probe); root_img_path = derived[c]; break; }
-                if (c == 0) root_img_path = derived[0];   /* name one in the error */
-            }
+            dbg("kernel: %s read from inside %s (%u bytes)\n",
+                kp, path, kernel_img_len);
+            fclose(ki);
         }
+        /* The booted image is its own root filesystem unless --tape says else. */
+        if (!root_img_path) root_img_path = path;
+
         root_img = fopen(root_img_path, "rb");
         if (root_img)
             dbg("root image: %s (open)\n", root_img_path);
         else
-            /* Say what this is about to cause.  The kernel's own complaint
-               arrives thousands of instructions later and names nothing that
-               points back here. */
+            /* Only reachable through --tape= now, since the booted image was
+               opened successfully a few lines above.  Say what it will cause:
+               the kernel's own complaint arrives thousands of instructions
+               later and names nothing that points back here. */
             fprintf(stderr, "root image: %s could not be opened -- disk reads "
                     "will return zeros and the kernel will panic with "
-                    "`vfs_mountroot: cannot mount root'.  Pass --tape=PATH.\n",
-                    root_img_path);
+                    "`vfs_mountroot: cannot mount root'\n", root_img_path);
         /* SCSI disk (sd0) target -- read/write, must already exist */
         disk_img = fopen(disk_img_path, "r+b");
         if (disk_img) {
