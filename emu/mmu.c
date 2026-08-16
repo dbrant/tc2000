@@ -38,7 +38,7 @@ void build_free_list(void)
            CMRAM data port -- populate the dedicated CMRAM store, not main RAM */
         cmram_w32(slot, (i + 1 < n) ? head + (i + 1) * fl_stride : 0);
     }
-    printf("synthetic free list: head %08x, %u entries, stride %#x\n",
+    dbg("synthetic free list: head %08x, %u entries, stride %#x\n",
            head, n, fl_stride);
 }
 
@@ -74,7 +74,7 @@ void boot_build_tables(void)
         mem_w32(cmmu_present[i] + CMMU_SAPR, tab | 1);
         mem_w32(cmmu_present[i] + CMMU_UAPR, DATA_SEGTAB | 1);
     }
-    printf("synthetic boot: %s map, tables at %08x (code) / %08x (data), "
+    dbg("synthetic boot: %s map, tables at %08x (code) / %08x (data), "
            "%u page tables\n", realmm ? "direct(VA-0xC0000000)" : "identity",
            CODE_SEGTAB, DATA_SEGTAB, (ptpool_next - PTPOOL) / PAGE_SIZE);
 }
@@ -343,14 +343,14 @@ u32 translate(u32 va, int code)
                    then read from somewhere else than it was written.  That is
                    the corruption; count it. */
                 if (kfall_n++ < (verbose_sys ? 200000u : 10u))
-                    printf("[kfall] kernel VA %08x not in the kernel's table, "
+                    dbg("[kfall] kernel VA %08x not in the kernel's table, "
                            "using linear %08x  pc=%08x @%llu\n",
                            va, lin, cpu.pc, (unsigned long long)cpu.count);
                 return lin;
             }
             if (pa != lin) {
                 if (verbose_sys && kdis_n < 40)
-                    printf("[kdis] kernel VA %08x: table %08x != linear %08x  "
+                    dbg("[kdis] kernel VA %08x: table %08x != linear %08x  "
                            "pc=%08x @%llu\n", va, pa, lin, cpu.pc,
                            (unsigned long long)cpu.count);
                 kdis_n++;
@@ -402,7 +402,7 @@ u32 translate(u32 va, int code)
         last_fault_va = va;
         last_fault_pc = cpu.pc;
         if (realmm && xlat_faults <= 20)
-            printf("[xlat MISS] va=%08x pc=%08x apr=%08x @%llu\n",
+            dbg("[xlat MISS] va=%08x pc=%08x apr=%08x @%llu\n",
                    va, cpu.pc, apr, (unsigned long long)cpu.count);
         return realmm ? cphys(va) : va;
     }

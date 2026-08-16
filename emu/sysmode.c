@@ -14,12 +14,12 @@ void proc_table_dump(void)
 {
     u32 pb = mem_r32(translate(0xC1015758u, 0));
     u32 np = mem_r32(translate(0xC1014B80u, 0));
-    printf("  proc table (stat: 1=SLEEP 3=RUN 4=IDL 5=ZOMB):\n");
+    dbg("  proc table (stat: 1=SLEEP 3=RUN 4=IDL 5=ZOMB):\n");
     for (u32 i = 0, shown = 0; pb && i < np && shown < 16; i++) {
         u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
         if (!st) continue;
         shown++;
-        printf("    proc %08x pid %-5u stat %u  wchan %08x  link %08x rlink %08x"
+        dbg("    proc %08x pid %-5u stat %u  wchan %08x  link %08x rlink %08x"
                "  runq %08x  parent %08x  clu %u\n",
                q, mem_r32(translate(q + 0x4Cu, 0)) >> 16, st,
                mem_r32(translate(q + 0x44u, 0)),
@@ -57,9 +57,9 @@ int run_sys(const char *path, u64 limit, u32 sig)
     mem_load(dload, a.img + HDR_PAGE + a.text, a.data);
     mem_zero(dload + a.data, a.bss);
 
-    printf("kernel: text %u @ phys %08x  data %u @ phys %08x  bss %u  entry %08x\n",
+    dbg("kernel: text %u @ phys %08x  data %u @ phys %08x  bss %u  entry %08x\n",
            a.text, tload, a.data, dload, a.bss, a.entry);
-    if (sig) printf("forcing TCS EEPROM signature '%c' at %08x\n",
+    if (sig) dbg("forcing TCS EEPROM signature '%c' at %08x\n",
                     (char)sig, force_sig_pc);
 
     if (synth_boot) { boot_build_tables(); build_free_list(); }
@@ -114,16 +114,16 @@ int run_sys(const char *path, u64 limit, u32 sig)
            Exempt genuine user-mode execution (PSR bit31 clear), where a low PC
            is expected. */
         if (realmm && cpu.pc < 0xC0000000u && (cpu.cr[1] & 0x80000000u)) {
-            printf("[derail] jumped to %08x from kernel pc=%08x @%llu\n",
+            dbg("[derail] jumped to %08x from kernel pc=%08x @%llu\n",
                    cpu.pc, last_kpc, (unsigned long long)cpu.count);
-            printf("[derail] last sleep: chan=%08x from=%08x\n",
+            dbg("[derail] last sleep: chan=%08x from=%08x\n",
                    last_sleep_chan, last_sleep_from);
             if (dump_pchist) {
-                printf("--- last %d PCs before the derail ---\n", PCH_N);
+                dbg("--- last %d PCs before the derail ---\n", PCH_N);
                 for (unsigned k = 0; k < PCH_N; k++)
-                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                    dbg("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
                            (k % 8 == 7) ? "\n" : " ");
-                printf("\n");
+                dbg("\n");
             }
             break;
         }
@@ -136,7 +136,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
            and report the milestone instead.) */
         if (cpu.pc == 0xC0054720u && RD(1) == 0xC004859Cu && RD(2) == 0xC0047F88u) {
             if (kmsgs) kmsg_flush();
-            printf("[boot-complete] kernel reached the swapper sched() idle "
+            dbg("[boot-complete] kernel reached the swapper sched() idle "
                    "loop @%llu -- main() done, root mounted.\n",
                    (unsigned long long)cpu.count);
             if (procexp) { if (proc_experiment()) continue; break; }  /* real proc */
@@ -207,7 +207,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     cpu.pc = 0xC0055CC0u;
                     continue;
                 }
-                printf("[procexp] scheduler made no progress -- deadlock?\n");
+                dbg("[procexp] scheduler made no progress -- deadlock?\n");
             }
             /* ★ WARN ABOUT UNFLUSHED DISK WRITES.  This harness ends the
                moment our process tree exits -- there is no shutdown, so the
@@ -225,16 +225,16 @@ int run_sys(const char *path, u64 limit, u32 sig)
                30M instructions and no return.  It has to run as a real process,
                so the guest has to ask for it.  Say so loudly instead. */
             if (disk_wrote && !fs_synced)
-                printf("[disk] ★ WARNING: disk.img was written through the "
+                dbg("[disk] ★ WARNING: disk.img was written through the "
                        "buffer cache but the guest never ran sync or umount, so "
                        "dirty\n       filesystem metadata did NOT reach the "
                        "image.  A LATER run will panic `ialloc: dup alloc' or\n"
                        "       `free: freeing free block'.  End the script with "
                        "`/etc/umount /mnt' (or `sync').\n");
             if (interactive)
-                printf("\n[halt] shell exited -- machine halted.\n");
+                dbg("\n[halt] shell exited -- machine halted.\n");
             else
-                printf("[procexp] all our processes exited @%llu\n",
+                dbg("[procexp] all our processes exited @%llu\n",
                        (unsigned long long)cpu.count);
             if (!verbose_sys) break;
             proc_table_dump();
@@ -243,7 +243,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 u32 q = pb + i * 512u, st = mem_r32(translate(q + 0x40u, 0));
                 if (!st) continue;
                 shown++;
-                printf("    proc %08x #%-4u pid %-5u stat %u node %u clu %u\n",
+                dbg("    proc %08x #%-4u pid %-5u stat %u node %u clu %u\n",
                        q, i, mem_r32(translate(q + 0x4Cu, 0)) >> 16, st,
                        mem_r32(translate(q + 0x7Cu, 0)),
                        mem_r32(translate(q + 0x90u, 0)));
@@ -253,15 +253,15 @@ int run_sys(const char *path, u64 limit, u32 sig)
         /* halt catcher: _tcs_shutdown+0x38 and _doadump+0x20 are br-to-self
            spins reached only after a panic/reboot has run its course */
         if (cpu.pc == 0xC00A24F4u || cpu.pc == 0xC00A24B8u) {
-            printf("[halt] reached %s spin at %08x @%llu\n",
+            dbg("[halt] reached %s spin at %08x @%llu\n",
                    cpu.pc == 0xC00A24F4u ? "tcs_shutdown" : "doadump",
                    cpu.pc, (unsigned long long)cpu.count);
             if (dump_pchist) {
-                printf("--- last %d PCs before halt ---\n", PCH_N);
+                dbg("--- last %d PCs before halt ---\n", PCH_N);
                 for (unsigned k = 0; k < PCH_N; k++)
-                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                    dbg("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
                            (k % 8 == 7) ? "\n" : " ");
-                printf("\n");
+                dbg("\n");
             }
             break;
         }
@@ -280,35 +280,35 @@ int run_sys(const char *path, u64 limit, u32 sig)
                through translate(). */
             char m[160];
             uread_str(RD(2), m, sizeof m);
-            printf("[PANIC] %s  (from %08x, @%llu)\n", m, RD(1),
+            dbg("[PANIC] %s  (from %08x, @%llu)\n", m, RD(1),
                    (unsigned long long)cpu.count);
-            printf("[PANIC] last sleep: chan=%08x from=%08x\n",
+            dbg("[PANIC] last sleep: chan=%08x from=%08x\n",
                    last_sleep_chan, last_sleep_from);
             if (dump_pchist) {
-                printf("--- last %d PCs before the panic ---\n", PCH_N);
+                dbg("--- last %d PCs before the panic ---\n", PCH_N);
                 for (unsigned k = 0; k < PCH_N; k++)
-                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                    dbg("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
                            (k % 8 == 7) ? "\n" : " ");
-                printf("\n");
+                dbg("\n");
             }
         }
         /* _simple_lock_failed / _pmap_lock: report who spun on what, once. */
         if (cpu.pc == 0xC0018170u || cpu.pc == 0xC00A7C78u) {
             static int once;
             if (!once && dump_pchist) {
-                printf("--- last %d PCs before the spin ---\n", PCH_N);
+                dbg("--- last %d PCs before the spin ---\n", PCH_N);
                 for (unsigned k = 0; k < PCH_N; k++)
-                    printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+                    dbg("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
                            (k % 8 == 7) ? "\n" : " ");
-                printf("\n");
+                dbg("\n");
             }
             if (!once++)
-                printf("[lockspin] simple_lock(%08x) failed; r1=%08x r26=%08x "
+                dbg("[lockspin] simple_lock(%08x) failed; r1=%08x r26=%08x "
                        "r25=%08x r27=%08x @%llu\n", RD(2), RD(1), RD(26),
                        RD(25), RD(27), (unsigned long long)cpu.count);
         }
         if (trace_pc_until && cpu.count < trace_pc_until)
-            printf("[pctrace] %08x\n", cpu.pc);
+            dbg("[pctrace] %08x\n", cpu.pc);
         last_kpc = cpu.pc;
         /* Kernel console output.  subr_prf.o funnels every character printf
            produces through _putchar(c, ...), whatever the message started out
@@ -320,7 +320,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
         if (brk_watch_pc && !(cpu.cr[1] & 0x80000000u)
             && (cpu.pc == brk_watch_pc + 4u || cpu.pc == brk_watch_pc + 8u)) {
             if (!quiet_uproc)
-                printf("[brk] obreak(%08x) -> %s, r2=%08x r3=%08x\n", brk_watch_arg,
+                dbg("[brk] obreak(%08x) -> %s, r2=%08x r3=%08x\n", brk_watch_arg,
                        cpu.pc == brk_watch_pc + 8u ? "ok" : "ERR", RD(2), RD(3));
             brk_watch_pc = 0;
         }
@@ -349,7 +349,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                could not run a forked shell, and it is gone. */
             ufault_pending = 0;
             if (!interactive && ufaults++ < (verbose_sys ? 100000u : 12u))
-                printf("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",
+                dbg("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",
                        real_pid(), ufault_va,
                        ufault_code ? "code" : "data",
                        ufault_code ? "" : (ufault_write ? " write" : " read"),
@@ -379,7 +379,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     && (RD(9) == 34 || RD(9) == 159))
                     fs_synced = 1;
                 if (trace_traps)
-                    printf("[trap] pid %d vec %u pc=%08x  syscall r9=%-4u "
+                    dbg("[trap] pid %d vec %u pc=%08x  syscall r9=%-4u "
                            "args %08x %08x %08x @%llu\n",
                            real_pid(), trap_vector, trap_pc, RD(9),
                            RD(2), RD(3), RD(4),
@@ -424,7 +424,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                         uread_str(RD(2), p, sizeof p);
                         if (strstr(p, "sd0")) fd_watch_disk = 1;
                         if (verbose_sys)
-                            printf("[open] pid %d \"%s\" @%llu\n", real_pid(), p,
+                            dbg("[open] pid %d \"%s\" @%llu\n", real_pid(), p,
                                    (unsigned long long)cpu.count);
                     }
                     /* dup: whatever the new descriptor turns out to be, it is
@@ -438,7 +438,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     && !(cpu.cr[1] & 0x80000000u) && RD(9) == 59) {
                     char p[128];
                     uread_str(RD(2), p, sizeof p);
-                    printf("[exec] pid %d \"%s\" @%llu\n", real_pid(), p,
+                    dbg("[exec] pid %d \"%s\" @%llu\n", real_pid(), p,
                            (unsigned long long)cpu.count);
                 }
                 if (trap_vector == 128 && !(cpu.cr[1] & 0x80000000u) && RD(9) == 6
@@ -457,7 +457,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 trap_taken = 0;
                 continue;
             }
-            printf("trap %d at pc=%08x after %llu instructions\n",
+            dbg("trap %d at pc=%08x after %llu instructions\n",
                    (int)trap_vector, trap_pc, (unsigned long long)cpu.count);
             break;
         }
@@ -466,37 +466,37 @@ int run_sys(const char *path, u64 limit, u32 sig)
        Dump the ring so the loop body is visible (nothing else caught it). */
     if (verbose_sys && cpu.count >= limit) proc_table_dump();
     if (dump_pchist && cpu.count >= limit) {
-        printf("--- last %d PCs at the instruction limit (spin?) ---\n", PCH_N);
+        dbg("--- last %d PCs at the instruction limit (spin?) ---\n", PCH_N);
         for (unsigned k = 0; k < PCH_N; k++)
-            printf("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
+            dbg("%08x%s", pchist[(pchpos + k) & (PCH_N - 1)],
                    (k % 8 == 7) ? "\n" : " ");
-        printf("\n");
+        dbg("\n");
     }
     if (!quiet_uproc)
         for (int k = 0; k < 32; k += 4) {
-            printf("  ");
-            for (int j = k; j < k + 4; j++) printf("r%-2d=%08x  ", j, RD(j));
-            putchar('\n');
+            dbg("  ");
+            for (int j = k; j < k + 4; j++) dbg("r%-2d=%08x  ", j, RD(j));
+            dbg("\n");
         }
     if (profile) prof_report();
     if (vmprobe) vm_probe_report();
     if (ctxtrace) ctx_report();
-    if (clock_irq) printf("clock interrupts delivered: %llu (softint re-asserts %llu)\n",
+    if (clock_irq) dbg("clock interrupts delivered: %llu (softint re-asserts %llu)\n",
                           (unsigned long long)clock_ticks, (unsigned long long)softint_ticks);
-    if (ufaults) printf("user page faults resolved through the kernel's VM: %llu\n",
+    if (ufaults) dbg("user page faults resolved through the kernel's VM: %llu\n",
                         (unsigned long long)ufaults);
-    if (ktab_bias) printf("user-space walks through the kernel's real tables: %llu\n",
+    if (ktab_bias) dbg("user-space walks through the kernel's real tables: %llu\n",
                           (unsigned long long)kwalk_user);
     double secs = (double)(clock() - t0) / CLOCKS_PER_SEC;
     if (!quiet_uproc) {
-        printf("tcs commands: %llu\n", (unsigned long long)tcs_commands);
+        dbg("tcs commands: %llu\n", (unsigned long long)tcs_commands);
         if (translate_on)
-            printf("translation: %llu faults (last va %08x from pc %08x)\n",
+            dbg("translation: %llu faults (last va %08x from pc %08x)\n",
                    (unsigned long long)xlat_faults, last_fault_va, last_fault_pc);
-        printf("cmmu probes: %llu hit, %llu miss\n",
+        dbg("cmmu probes: %llu hit, %llu miss\n",
                (unsigned long long)probe_hits, (unsigned long long)probe_misses);
     }
-    printf("stopped at pc=%08x after %llu instructions (%.2fs, %.1f Minsn/s)\n",
+    dbg("stopped at pc=%08x after %llu instructions (%.2fs, %.1f Minsn/s)\n",
            cpu.pc, (unsigned long long)cpu.count, secs,
            secs > 0 ? cpu.count / secs / 1e6 : 0.0);
     return 0;

@@ -29,7 +29,7 @@ void memop(u32 sub, u32 D, u32 ea)
     }
     if (scsi_trace && ea >= 0xFC000000u && ea < 0xFC010000u && scsi_trace_n < 100000) {
         int st = (sub >= 0x08 && sub <= 0x0B);
-        printf("[scsi] %-2s %08x sub=%x val=%08x pc=%08x @%llu\n",
+        dbg("[scsi] %-2s %08x sub=%x val=%08x pc=%08x @%llu\n",
                st ? "WR" : "RD", ea, sub, st ? RD(D) : 0, dbg_pc,
                (unsigned long long)cpu.count);
         scsi_trace_n++;
@@ -41,7 +41,7 @@ void memop(u32 sub, u32 D, u32 ea)
         else if (v == 1) {                                 /* command: complete it */
             mem_w16(SHA_BASE + 0x73c, (u16)sha_done_status);
             if (scsi_trace)
-                printf("[sha] cmd=1: poked %08x = %04x, reads back %04x\n",
+                dbg("[sha] cmd=1: poked %08x = %04x, reads back %04x\n",
                        SHA_BASE + 0x73c, (u16)sha_done_status,
                        mem_r16(SHA_BASE + 0x73c));
         }
@@ -234,7 +234,7 @@ void sd_ensure_label(void)
     fseek(disk_img, 0, SEEK_SET);
     fwrite(lbl, 1, 512, disk_img);
     fflush(disk_img);
-    printf("disk image: wrote synthetic Sun disklabel "
+    dbg("disk image: wrote synthetic Sun disklabel "
            "(%u cyl x %u hd x %u sec = %u blocks)\n", ncyl, nhead, nsect, blocks);
 }
 
@@ -260,7 +260,7 @@ void sha_sdcomplete(u32 cmd)
         u32 cw2 = mem_r32(translate(cmd + 0x74, 0));
         u32 lba = (op == 0x08 || op == 0x0a) ? (cdbw & 0x1FFFFFu)
                                              : ((cdbw << 16) | (cw2 >> 16));
-        printf("[sdcmd] target=%u op=%02x lba=%u dma=%08x xfer=%u @%llu\n",
+        dbg("[sdcmd] target=%u op=%02x lba=%u dma=%08x xfer=%u @%llu\n",
                target, op, lba, dma, xfer, (unsigned long long)cpu.count);
     }
 
@@ -346,19 +346,19 @@ void sha_complete(void)
         mem_w32(pa, mem_r32(pa) & ~sha_desc_clear);
     }
     if (scsi_trace) {
-        printf("[sha] complete: caller=%08x desc=%08x r4(lock?)=%08x chan=%08x @%llu\n",
+        dbg("[sha] complete: caller=%08x desc=%08x r4(lock?)=%08x chan=%08x @%llu\n",
                RD(1), desc, RD(4), RD(2),
                (unsigned long long)cpu.count);
         /* dump the IOPB descriptor and the SHA dual-port CDB region */
         if (desc >= 0xC0000000u) {
-            printf("[iopb] desc %08x:", desc);
+            dbg("[iopb] desc %08x:", desc);
             for (int i = 0; i < 0x40; i += 4)
-                printf(" %08x", mem_r32(translate(desc + i, 0)));
-            printf("\n");
+                dbg(" %08x", mem_r32(translate(desc + i, 0)));
+            dbg("\n");
         }
-        printf("[dpram] fc008890:");
+        dbg("[dpram] fc008890:");
         for (u32 aa = 0xFC008890u; aa < 0xFC0088C0u; aa += 2)
-            printf(" %04x", mem_r16(aa));
-        printf("\n");
+            dbg(" %04x", mem_r16(aa));
+        dbg("\n");
     }
 }

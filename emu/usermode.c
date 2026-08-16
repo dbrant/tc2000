@@ -117,21 +117,21 @@ int run_user(const char *path, int argc, char **argv, u64 limit)
     mem_load(dv, a.img + HDR_PAGE + a.text, a.data);
     mem_zero(dv + a.data, a.bss);
 
-    printf("%s\n  text %u @ 00000000  data %u @ %08x  bss %u  entry %08x\n",
+    dbg("%s\n  text %u @ 00000000  data %u @ %08x  bss %u  entry %08x\n",
            path, a.text, a.data, dv, a.bss, a.entry);
 
     memset(&cpu, 0, sizeof cpu);
     cpu.pc = a.entry;
     WR(31, build_stack(argc, argv));
 
-    printf("--- output ------------------------------------------------\n");
+    dbg("--- output ------------------------------------------------\n");
     while (cpu.count < limit) {
         if (step()) {
             if (trap_vector == 128) {
                 do_syscall();
                 if (exited >= 0) {
-                    printf("\n-----------------------------------------------------------\n");
-                    printf("exited(%d) after %llu instructions\n",
+                    dbg("\n-----------------------------------------------------------\n");
+                    dbg("exited(%d) after %llu instructions\n",
                            exited, (unsigned long long)cpu.count);
                     return 0;
                 }
@@ -139,12 +139,12 @@ int run_user(const char *path, int argc, char **argv, u64 limit)
                 cpu.pc = trap_pc + (sys_err ? 4 : 8);
                 trap_taken = 0;
             } else {
-                printf("\n*** trap %d at pc=%08x after %llu instructions\n",
+                dbg("\n*** trap %d at pc=%08x after %llu instructions\n",
                        (int)trap_vector, trap_pc, (unsigned long long)cpu.count);
                 return 1;
             }
         }
     }
-    printf("\n(instruction limit reached at pc=%08x)\n", cpu.pc);
+    dbg("\n(instruction limit reached at pc=%08x)\n", cpu.pc);
     return 0;
 }

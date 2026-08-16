@@ -237,6 +237,31 @@ static int con_in_byte(void)
 #endif  /* __EMSCRIPTEN__ */
 }
 
+/* ★ Is a CR's paired LF/NUL right behind it, or must we wait to find out?
+
+   On a telnet wire it always is: RFC 854 encodes a line ending as CR LF or
+   CR NUL, so the byte after a CR is already on its way and reading it
+   unconditionally is safe.  It is also NECESSARY there -- TCP can deliver the
+   CR by itself, and a peek that gave up on finding nothing would leave the LF
+   to be read as a fresh, empty line, which con_sock_read reports as EOF and
+   which would kill the shell.
+
+   The page's wire carries no such encoding.  xterm sends ONE byte per
+   keystroke, so RETURN is a lone CR with nothing behind it -- and reading
+   unconditionally BLOCKED: the line sat undelivered until the next key was
+   pressed, whereupon that key satisfied the read, got pushed back, and the
+   line finally went through.  Pressing Enter appeared to do nothing, and the
+   next character appeared to deliver both.  So on that wire, look only when a
+   byte is already in hand.  An embedder that sends a genuine "...\r\n" through
+   send() still works, because both bytes reach the ring together and the peek
+   finds the LF. */
+#ifdef __EMSCRIPTEN__
+static int con_input_ready(void);
+#define CON_CR_PAIR_WAITING() con_input_ready()
+#else
+#define CON_CR_PAIR_WAITING() 1
+#endif
+
 /* Assemble one cooked line from the socket: server-side echo, backspace editing,
    CR / CRLF / CR-NUL -> LF, ^D as EOF.  Returns length; 0 means end-of-file
    (client closed or ^D on an empty line). */
@@ -247,7 +272,7 @@ static u32 con_cook_line(u8 *dst, u32 cap)
         int b = con_in_byte();
         if (b < 0) return n;                          /* disconnect: 0 => EOF */
         if (b == '\r' || b == '\n') {
-            if (b == '\r') {                          /* absorb a paired LF or NUL */
+            if (b == '\r' && CON_CR_PAIR_WAITING()) {  /* absorb a paired LF or NUL */
                 int nx = con_in_byte();
                 if (nx >= 0 && nx != '\n' && nx != 0) con_pushback = nx;
             }

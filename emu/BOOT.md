@@ -40,6 +40,32 @@ that cracked several blockers), `--watch=PC`, `--nodes=N`, and the two image
 paths `--tape=PATH` (root filesystem / tape UFS; default `<vmunix-dir>.img`) and
 `--disk=PATH` (SCSI sd0 install target; default `disk.img`).
 
+### What reaches the terminal — `--debug`
+
+Two different voices used to share stdout, and the louder one was not the
+interesting one. What the **machine** says — the kernel's log (`--kmsg`) and the
+guest process's own output — is what someone running it came for. What the
+**emulator** says about the machine — the load map, the synthetic boot tables,
+the proc experiment's register dumps, `[kfall]`, `[halt]`, `[PANIC]`, the
+closing instruction count — is debugging, and there is enough of it to bury the
+kernel's log completely.
+
+All of the latter now goes through `dbg()` (see `nx88.h`) and needs `--debug`:
+
+```sh
+./nx88.exe sys <path-to>/tapeimage/vmunix --shell           # the machine only
+./nx88.exe sys <path-to>/tapeimage/vmunix --shell --kmsg    # + the kernel's log
+./nx88.exe sys <path-to>/tapeimage/vmunix --shell --debug   # + everything else
+```
+
+Every *other* diagnostic flag (`--trace-traps`, `--wmem=`, `--pwatch=`,
+`--profile`, `--pchist`, `--vmprobe`, `--ctxtrace`, `--scsitrace`, `--watch=`,
+`--uprog=`, `--handload=`, `-v`, …) switches `--debug` on for itself, so no
+command line here prints less than it used to; what changed is the bare
+`sys vmunix` and `--shell` runs. `--quiet` switches it back off, and options are
+read left to right, so the last one wins. Genuine failures — a tape image that
+will not open, a bad a.out — are not commentary and stay on stderr regardless.
+
 ### The kernel's own boot messages — `--kmsg`
 
 `--kmsg` prints everything the kernel says, formatted by the kernel itself. It

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build nx88 from the split sources.
 #
-#   ./build.sh
+#   ./build.sh              from emu/
+#   ./emu/build.sh          from the repo root -- same thing; see the cd below
 #
 # Windows (MSYS2 UCRT64): export PATH="/c/msys64/ucrt64/bin:$PATH" first.  The
 # running nx88.exe holds a file lock there, so it is killed before linking, and
@@ -14,6 +15,10 @@
 # The binary keeps the name nx88.exe on every platform so the commands in
 # BOOT.md (and everyone's shell history) work unchanged on both machines.
 set -e
+# The source list below is bare filenames, so the build has to run from here.
+# Anchoring to the script's own directory -- which web/build.sh and serve.py
+# already do -- is what lets it be invoked by path from anywhere.
+cd "$(dirname "$0")"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)

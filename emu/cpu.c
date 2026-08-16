@@ -47,7 +47,7 @@ void vm_probe_tick(u32 pc)
             vmprobes[i].count++;
             if (pc == 0xC008B35Cu && vmfault_logged < 12) {
                 vmfault_logged++;
-                printf("[vmflt] vm_map_fault r2=%08x r3=%08x r4=%08x mode=%s "
+                dbg("[vmflt] vm_map_fault r2=%08x r3=%08x r4=%08x mode=%s "
                        "ret=%08x @%llu\n", RD(2), RD(3), RD(4),
                        (cpu.cr[1] & 0x80000000u) ? "sup" : "USER", RD(1),
                        (unsigned long long)cpu.count);
@@ -71,7 +71,7 @@ void prof_report(void)
 {
     u64 tot = prof_other;
     for (u32 i = 0; i < PROF_BINS; i++) tot += prof_hist[i];
-    printf("=== profile: hottest kernel-text 32-byte bins (%llu instructions, "
+    dbg("=== profile: hottest kernel-text 32-byte bins (%llu instructions, "
            "%llu outside kernel text) ===\n",
            (unsigned long long)tot, (unsigned long long)prof_other);
     for (int rank = 0; rank < 20; rank++) {
@@ -79,7 +79,7 @@ void prof_report(void)
         for (u32 i = 0; i < PROF_BINS; i++)
             if (prof_hist[i] > bv) { bv = prof_hist[i]; best = i; }
         if (!bv) break;
-        printf("  %08x  %12llu  %5.2f%%\n", PROF_LO + best * 32u,
+        dbg("  %08x  %12llu  %5.2f%%\n", PROF_LO + best * 32u,
                (unsigned long long)bv, tot ? 100.0 * (double)bv / (double)tot : 0.0);
         prof_hist[best] = 0;
     }
@@ -87,9 +87,9 @@ void prof_report(void)
 
 void vm_probe_report(void)
 {
-    printf("=== VM probe: kernel VM/fault machinery calls ===\n");
+    dbg("=== VM probe: kernel VM/fault machinery calls ===\n");
     for (unsigned i = 0; i < sizeof vmprobes / sizeof vmprobes[0]; i++)
-        printf("  %-22s %10llu   first@%llu\n", vmprobes[i].name,
+        dbg("  %-22s %10llu   first@%llu\n", vmprobes[i].name,
                (unsigned long long)vmprobes[i].count,
                (unsigned long long)vmprobes[i].first);
 }
@@ -119,7 +119,7 @@ void ctx_tick(void)
     if (nkctx >= KCTX_MAX) return;
     kctx[nkctx].ctx = c; kctx[nkctx].first = cpu.count;
     kctx[nkctx].n = 1;   kctx[nkctx].from  = RD(1);
-    printf("[ctx] #%-3u %08x  pc=%08x sp=%08x kstk=%08x cmmu=%08x  from=%08x @%llu\n",
+    dbg("[ctx] #%-3u %08x  pc=%08x sp=%08x kstk=%08x cmmu=%08x  from=%08x @%llu\n",
            nkctx, c, kr32(c + 0x80), kr32(c + 0x7c), kr32(c + 0x98),
            kr32(c + 0xa0), RD(1), (unsigned long long)cpu.count);
     nkctx++;
@@ -127,9 +127,9 @@ void ctx_tick(void)
 
 void ctx_report(void)
 {
-    printf("=== load_context: %u distinct contexts ===\n", nkctx);
+    dbg("=== load_context: %u distinct contexts ===\n", nkctx);
     for (unsigned i = 0; i < nkctx; i++)
-        printf("  #%-3u %08x  switches=%-6llu first@%llu\n", i, kctx[i].ctx,
+        dbg("  #%-3u %08x  switches=%-6llu first@%llu\n", i, kctx[i].ctx,
                (unsigned long long)kctx[i].n, (unsigned long long)kctx[i].first);
 }
 
@@ -145,7 +145,7 @@ void pwatch_hit(u32 a, u8 v)
 {
     static unsigned n;
     if (n++ < 40)
-        printf("[pwatch] PA %08x <= %02x  pc=%08x r1=%08x r31=%08x sup=%d @%llu\n",
+        dbg("[pwatch] PA %08x <= %02x  pc=%08x r1=%08x r31=%08x sup=%d @%llu\n",
                a, v, dbg_pc, RD(1), RD(31),
                (cpu.cr[1] & 0x80000000u) ? 1 : 0, (unsigned long long)cpu.count);
 }
@@ -156,11 +156,11 @@ void stwatch_tick(u32 pc)
 {
     if (!stwatch_done && !stwatch_active && pc == stwatch_pc) {
         stwatch_active = 1; stwatch_ret = RD(1);
-        printf("[stw] enter %08x r2=%08x r3=%08x r4=%08x r5=%08x ret=%08x\n",
+        dbg("[stw] enter %08x r2=%08x r3=%08x r4=%08x r5=%08x ret=%08x\n",
                pc, RD(2), RD(3), RD(4), RD(5), stwatch_ret);
     } else if (stwatch_active && pc == stwatch_ret) {
         stwatch_active = 0; stwatch_done = 1;
-        printf("[stw] leave, r2=%08x\n", RD(2));
+        dbg("[stw] leave, r2=%08x\n", RD(2));
     }
 }
 void wmem_tick(u32 sub, u32 D, u32 va)
@@ -170,7 +170,7 @@ void wmem_tick(u32 sub, u32 D, u32 va)
     int store = (sub >= 0x08 && sub <= 0x0B) || sub <= 0x01;
     if (!store) return;
     if (wmem_n++ >= wmem_max) return;
-    printf("[wmem] %08x (+%-4d) <= %08x  pc=%08x r1=%08x r31=%08x @%llu\n",
+    dbg("[wmem] %08x (+%-4d) <= %08x  pc=%08x r1=%08x r31=%08x @%llu\n",
            va, (int)(va - wmem_lo), RD(D), dbg_pc, RD(1), RD(31),
            (unsigned long long)cpu.count);
 }
@@ -182,7 +182,7 @@ void regfind_tick(u32 pc)
     for (unsigned r = 2; r < 32; r++)
         if (cpu.r[r] == regfind_val) {
             if (regfind_n++ < 60)
-                printf("[rfind] r%-2u = %08x at pc=%08x r1=%08x @%llu\n",
+                dbg("[rfind] r%-2u = %08x at pc=%08x r1=%08x @%llu\n",
                        r, regfind_val, pc, RD(1), (unsigned long long)cpu.count);
             return;
         }
@@ -225,11 +225,11 @@ u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
     /* Never over an interactive session -- the shell owns that terminal. */
     if (returned) {
         if (!interactive)
-            printf("  [kcall %08x] -> %08x  (%llu steps)\n", fn, ret,
+            dbg("  [kcall %08x] -> %08x  (%llu steps)\n", fn, ret,
                    (unsigned long long)used);
     }
     else
-        printf("  [kcall %08x] DID NOT RETURN (%s pc=%08x vec=%d, %llu steps)\n",
+        dbg("  [kcall %08x] DID NOT RETURN (%s pc=%08x vec=%d, %llu steps)\n",
                fn, trapped ? "trap" : "runaway", tp, (int)tv,
                (unsigned long long)used);
     return returned ? ret : 0xFFFFFFFFu;
@@ -359,12 +359,12 @@ void set_curproc(u32 p, u32 ctx)
 
 static void dump_words(const char *what, u32 base, u32 n)
 {
-    printf("  %s @%08x:", what, base);
+    dbg("  %s @%08x:", what, base);
     for (u32 i = 0; i < n; i++) {
-        if (i % 8 == 0) printf("\n    +0x%03x:", i * 4);
-        printf(" %08x", kr32(base + i * 4));
+        if (i % 8 == 0) dbg("\n    +0x%03x:", i * 4);
+        dbg(" %08x", kr32(base + i * 4));
     }
-    printf("\n");
+    dbg("\n");
 }
 
 /* Walk an address space through the kernel's OWN tables.
@@ -412,8 +412,8 @@ static void uput32(u32 pmap, u32 va, u32 v)
 int proc_experiment(void)
 {
     u32 base = kr32(G_PROCBASE), cur = kr32(G_CURPROC);
-    printf("=== proc experiment: the kernel's real process allocator ===\n");
-    printf("  procbase=%08x nproc=%u procs/node=%u nodes=%u inuse=%u "
+    dbg("=== proc experiment: the kernel's real process allocator ===\n");
+    dbg("  procbase=%08x nproc=%u procs/node=%u nodes=%u inuse=%u "
            "nextpid=%u\n  curproc=%08x (proc #%u, pid %u)\n",
            base, kr32(G_NPROC), kr32(G_PROCPERND), kr32(G_NNODES),
            kr32(G_PROCINUSE), kr32(G_NEXTPID), cur, (cur - base) / P_SIZE,
@@ -432,7 +432,7 @@ int proc_experiment(void)
     for (u32 c = 2; ctab && c <= 3; c++)
         if (kr32(ctab + c * 0xB0u + 0x14u) == c) { clu = c; break; }
     procexp_cluster = clu;
-    printf("  cluster table @%08x: running in logical cluster %u%s\n", ctab, clu,
+    dbg("  cluster table @%08x: running in logical cluster %u%s\n", ctab, clu,
            clu ? "" : " (SYSTEM -- fork will panic)");
 
     /* Create it in cluster 0: newproc for another cluster dispatches into that
@@ -441,17 +441,17 @@ int proc_experiment(void)
        it afterwards -- that is what the fork gate actually reads. */
     u32 rc   = kcall(F_NEWPROC, 0, 0, 0, 0, 0);      /* newproc(-, node 0, -, -) */
     u32 p    = kr32(G_ALLPROC);
-    printf("  newproc(node 0) rc=%u   allproc head %08x -> %08x\n", rc, head, p);
-    if (rc || p == head) { printf("  !! no new proc\n"); return 0; }
+    dbg("  newproc(node 0) rc=%u   allproc head %08x -> %08x\n", rc, head, p);
+    if (rc || p == head) { dbg("  !! no new proc\n"); return 0; }
 
     if (clu) mem_w32(translate(p + 0x90u, 0), clu);   /* forkable cluster */
     procexp_pid = kr32(p + P_PID) >> 16;
     procexp_proc = p;
     u32 ctx = kr32(p + P_CTX);
-    printf("  NEW PROC %08x = proc #%u, pid %u, stat %u, node %u, umap %08x\n",
+    dbg("  NEW PROC %08x = proc #%u, pid %u, stat %u, node %u, umap %08x\n",
            p, (p - base) / P_SIZE, kr32(p + P_PID) >> 16, kr32(p + P_STAT),
            kr32(p + P_NODE), kr32(p + P_UMAP));
-    printf("  its context %08x: resume pc=%08x sp=%08x kstack=%08x cmmu=%08x\n",
+    dbg("  its context %08x: resume pc=%08x sp=%08x kstack=%08x cmmu=%08x\n",
            ctx, kr32(ctx + 0x80), kr32(ctx + 0x7c), kr32(ctx + 0x98),
            kr32(ctx + 0xa0));
     dump_words("proc", p, 64);
@@ -466,19 +466,19 @@ int proc_experiment(void)
        process. */
     u32 map  = kr32(p + P_UMAP);
     u32 pmap = kcall(0xC008F55Cu, map, 0, 0, 0, 0);      /* vm_map_pmap(map) */
-    printf("  vm_map %08x -> pmap %08x  (map+0x50 = %08x)\n",
+    dbg("  vm_map %08x -> pmap %08x  (map+0x50 = %08x)\n",
            map, pmap, kr32(map + 0x50));
     dump_words("vm_map", map, 24);
     if (pmap >= 0xC0000000u && pmap != 0xFFFFFFFFu) {
         dump_words("pmap", pmap, 24);
-        printf("  pmap[0]=%08x (ctx+0xa0=%08x)   pmap[1]|1=%08x (ctx+0xa4=%08x)"
+        dbg("  pmap[0]=%08x (ctx+0xa0=%08x)   pmap[1]|1=%08x (ctx+0xa4=%08x)"
                "  %s\n", kr32(pmap), kr32(ctx + 0xa0), kr32(pmap + 4) | 1u,
                kr32(ctx + 0xa4),
                (kr32(pmap) == kr32(ctx + 0xa0)
                 && (kr32(pmap + 4) | 1u) == kr32(ctx + 0xa4)) ? "MATCH" : "differ");
     }
     u32 pmap0 = kr32(kr32(cur + P_UMAP) + 0x50);
-    printf("  proc0: vm_map %08x pmap %08x apr %08x    live SAPR=%08x UAPR=%08x\n",
+    dbg("  proc0: vm_map %08x pmap %08x apr %08x    live SAPR=%08x UAPR=%08x\n",
            kr32(cur + P_UMAP), pmap0, kr32(pmap0 + 4) | 1u,
            mem_r32(0xFFF7E000u + CMMU_SAPR), mem_r32(0xFFF7E000u + CMMU_UAPR));
 
@@ -511,7 +511,7 @@ int proc_experiment(void)
        resolves through the kernel's own tables and the two agree, so the bias
        comes out zero and nothing is needed. */
     ktab_bias = translate(kr32(pmap), 0) - kr32(pmap + 4);
-    printf("  kernel table bias = %08x (table VA %08x, kernel PA %08x)\n",
+    dbg("  kernel table bias = %08x (table VA %08x, kernel PA %08x)\n",
            ktab_bias, kr32(pmap), kr32(pmap + 4));
 
     /* --- fill the address space ---
@@ -540,7 +540,7 @@ int proc_experiment(void)
     AOut a;
     u32 txtaddr = 0, txtoff = 0, dataddr = 0, datoff = 0, img_hi = 0x2000u;
     if (!procexec) {
-        if (aout_load(path, &a)) { printf("  !! cannot load %s\n", path); return 0; }
+        if (aout_load(path, &a)) { dbg("  !! cannot load %s\n", path); return 0; }
         /* nX tape a.out: an 8192-byte header page in the file, text at VA 0
            (see load_from_aout in proc.c for the two layouts). */
         int std  = ((a.magic >> 16) & 0xFFu) != 0;
@@ -571,7 +571,7 @@ int proc_experiment(void)
         u32 e = kcall(0xC008EB6Cu, map, slot, rng[i].hi - rng[i].lo,
                       0x90, 0xFFFFFFFFu);
         u32 w = kcall(0xC0092350u, map, rng[i].lo, rng[i].hi, 1, 0);
-        printf("  %s %08x..%08x: vm_allocate errno=%u, vm_map_pageable errno=%u\n",
+        dbg("  %s %08x..%08x: vm_allocate errno=%u, vm_map_pageable errno=%u\n",
                rng[i].what, rng[i].lo, rng[i].hi, e, w);
         if (e || w) return 0;
     }
@@ -591,7 +591,7 @@ int proc_experiment(void)
                 mem_w8(pa + i, b);
             }
         }
-        printf("  loaded %s: text=%u@%08x data=%u@%08x bss=%u entry=%08x "
+        dbg("  loaded %s: text=%u@%08x data=%u@%08x bss=%u entry=%08x "
                "(%u pages unmapped)\n", path, a.text, txtaddr, a.data, dataddr,
                a.bss, a.entry, missing);
         if (missing) return 0;
@@ -678,7 +678,7 @@ int proc_experiment(void)
                 uput32(pmap, at, boot[i]);
         for (unsigned i = 0; i < sizeof stub / 4; i++, at += 4)
             uput32(pmap, at, stub[i]);
-        printf("  exec stub at VA 0: 3x open(\"/dev/null\") then "
+        dbg("  exec stub at VA 0: 3x open(\"/dev/null\") then "
                "execve(\"%s\", argv@%08x, envp@%08x), sp=%08x\n",
                gpath, uargvp, uenvpp, sp);
     }
@@ -692,7 +692,7 @@ int proc_experiment(void)
     u32 tramp = PROCEXP_TRAMP;                /* kernel VA hole: past text, below data */
     u32 tpa = translate(tramp, 0);
     if (mem_r32(tpa) || mem_r32(tpa + 4)) {
-        printf("  !! trampoline page %08x is not free\n", tramp);
+        dbg("  !! trampoline page %08x is not free\n", tramp);
         return 0;
     }
     mem_w32(tpa + 0,  0x584F0000u);           /* or r2, r15, 0   ; entry */
@@ -712,7 +712,7 @@ int proc_experiment(void)
     u32 pctx = kr32(cur + P_CTX);
     kcall(0xC00173ECu, pctx, 0, 0, 0, 0);
     mem_w32(translate(pctx + 0x80, 0), PROCEXP_IDLE);
-    printf("  proc0 context %08x saved; it will resume at the idle sentinel %08x\n",
+    dbg("  proc0 context %08x saved; it will resume at the idle sentinel %08x\n",
            pctx, PROCEXP_IDLE);
 
     mem_w32(translate(ctx + 0x3c, 0), a.entry);   /* r15 = entry */
@@ -742,12 +742,11 @@ int proc_experiment(void)
     deliver_traps = 1;
     WR(2, ctx);
     cpu.pc = 0xC0017498u;                         /* load_context(ctx) */
-    printf("  load_context(%08x): resuming as pid %u, entry %08x, sp %08x\n",
+    dbg("  load_context(%08x): resuming as pid %u, entry %08x, sp %08x\n",
            ctx, kr32(p + P_PID) >> 16, a.entry, sp);
     if (interactive)
-        con_write_str("\n=== nX on the TC2000 -- /bin/sh from the 1989 install "
-                      "tape ===\nThe root filesystem is the tape's own UFS.  "
-                      "^D or `exit' quits.\n\n");
+        con_write_str("\nnX on the TC2000: -- vmunix running from an actual install "
+                      "tape from 1989.\n\n");
     return 1;
 }
 
@@ -756,11 +755,11 @@ int proc_experiment(void)
    standalone at the idle point. */
 void vm_experiment(void)
 {
-    printf("=== VM experiment: driving kernel VM functions via RPC ===\n");
+    dbg("=== VM experiment: driving kernel VM functions via RPC ===\n");
     /* Reference: the kernel's currently-active supervisor APR (its segment-table
        root), so we can recognise a segment-table-shaped value in the pmap. */
     u32 sapr = mem_r32(0xFFF7E000u + CMMU_SAPR);
-    printf("  (kernel SAPR = %08x)\n", sapr);
+    dbg("  (kernel SAPR = %08x)\n", sapr);
 
     /* Proven: the kernel's own VM allocators run standalone via RPC and return
        real structures.  This is the toolkit for building a real user address
@@ -768,17 +767,17 @@ void vm_experiment(void)
        the Mach VM call signatures (pmap_enter's 2nd arg is a pointer, not a raw
        VA). */
     u32 pmap = kcall(0xC0094058u, 0, 0, 0, 0, 0);           /* pmap_create(0)   */
-    printf("  pmap_create(0)         = %08x\n", pmap);
+    dbg("  pmap_create(0)         = %08x\n", pmap);
     if (pmap < 0xC0000000u || pmap == 0xFFFFFFFFu) return;
-    printf("  pmap struct:");
+    dbg("  pmap struct:");
     for (u32 i = 0; i < 24; i++) {
-        if (i % 6 == 0) printf("\n    +0x%02x:", i * 4);
-        printf(" %08x", mem_r32(translate(pmap + i * 4, 0)));
+        if (i % 6 == 0) dbg("\n    +0x%02x:", i * 4);
+        dbg(" %08x", mem_r32(translate(pmap + i * 4, 0)));
     }
-    printf("\n");
+    dbg("\n");
 
     u32 map = kcall(0xC004F9BCu, pmap, 0, 0x80000000u, 1, 0); /* vm_map_create  */
-    printf("  vm_map_create(pmap)    = %08x\n", map);
+    dbg("  vm_map_create(pmap)    = %08x\n", map);
 }
 
 u32 do_cmp(u32 a, u32 b)
@@ -1152,7 +1151,7 @@ int step(void)
                 }
             }
             if (scsi_trace)
-                printf("[%s-%s] buf=%08x flags=%08x blk=%u bcount=%u addr=%08x @%llu\n",
+                dbg("[%s-%s] buf=%08x flags=%08x blk=%u bcount=%u addr=%08x @%llu\n",
                        pc == SDSTRATEGY ? "strategy" : "getblk",
                        is_root ? "root" : "sd0", buf, flags, blkno, bcount, addr,
                        (unsigned long long)cpu.count);
@@ -1214,14 +1213,14 @@ int step(void)
                         fwrite(tmp, 1, bcount, dev), fflush(dev), disk_wrote = 1;
                 }
                 if (scsi_trace)
-                    printf("[bio-%s] %s blk=%u bcount=%u addr=%08x\n",
+                    dbg("[bio-%s] %s blk=%u bcount=%u addr=%08x\n",
                            is_read ? "rd" : "wr", is_root ? "root" : "sd0",
                            blkno, bcount, addr);
             }
             u32 pa = translate(buf, 0);
             mem_w32(pa, mem_r32(pa) | 2u);         /* set B_DONE (bit 1) */
             if (scsi_trace)
-                printf("[biodone] buf=%08x flags=%08x->%08x blk=%u bcount=%u addr=%08x @%llu\n",
+                dbg("[biodone] buf=%08x flags=%08x->%08x blk=%u bcount=%u addr=%08x @%llu\n",
                        buf, flags, mem_r32(pa), blkno, bcount, addr,
                        (unsigned long long)cpu.count);
         }
@@ -1259,7 +1258,7 @@ int step(void)
         u32 duapr = mem_r32(0xFFF7E000u + CMMU_UAPR);
         u32 pa1000 = 0; (void)mmu_walk(cuapr, 0x1000u, &pa1000, 0);
         if (!quiet_uproc)
-            printf("[ldctx-rte] PSR=%08x EPSR=%08x SXIP=%08x SNIP=%08x SFIP=%08x\n"
+            dbg("[ldctx-rte] PSR=%08x EPSR=%08x SXIP=%08x SNIP=%08x SFIP=%08x\n"
                    "            codeUAPR=%08x dataUAPR=%08x  user0x1000 -> pa=%08x word=%08x\n",
                    cpu.cr[1], cpu.cr[2], cpu.cr[4], cpu.cr[5], cpu.cr[6],
                    cuapr, duapr, pa1000, pa1000 ? mem_r32(pa1000) : 0);
@@ -1392,7 +1391,7 @@ int step(void)
        all zeros on a blank disk.img, so the magic check fails -> "cannot mount
        root".  Booting needs a real UFS root (miniroot) on rootdev. */
     if (scsi_trace && sysmode && pc == 0xC0071DBCu) {
-        printf("[mountroot] rootdev=%08x bootdev=%08x mountop@%08x @%llu\n",
+        dbg("[mountroot] rootdev=%08x bootdev=%08x mountop@%08x @%llu\n",
                mem_r32(translate(0xC1015A48u, 0)),
                mem_r32(translate(0xC009EB40u, 0)),
                RD(9), (unsigned long long)cpu.count);
@@ -1403,14 +1402,14 @@ int step(void)
        branch"; a straight-line trace from a known trigger can. */
     if (wtrace_at && cpu.count >= wtrace_at) { wtrace_left = wtrace_n; wtrace_at = 0; }
     if (wtrace_left) {
-        printf("[wt] %08x\n", pc);
+        dbg("[wt] %08x\n", pc);
         wtrace_left--;
     }
     if (watch_pc && pc == watch_pc) {
         if (wtrace_n && !wtrace_left) wtrace_left = wtrace_n;
         /* r9 is worth its place: it is the syscall number in nX's ABI, so
            --watch on the dispatcher (c00ab278) names the call. */
-        printf("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
+        dbg("[watch] pc=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x "
                "r7=%08x r8=%08x r9=%08x | r17=%08x r18=%08x r19=%08x r21=%08x r22=%08x "
                "r23=%08x r24=%08x r25=%08x r26=%08x r27=%08x @%llu\n",
                pc, RD(1), RD(2), RD(3), RD(4), RD(5), RD(6), RD(7), RD(8), RD(9),

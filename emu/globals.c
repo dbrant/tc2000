@@ -137,6 +137,7 @@ u32  regfind_val;      /* --regfind=V: log where a GPR first holds V */
 int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 int  interactive;      /* --shell: hand the terminal to /bin/sh */
 int  kmsgs;            /* --kmsg: echo the kernel's console output */
+int  debug;            /* --debug: let the EMULATOR's own commentary out */
 u32  brk_watch_pc, brk_watch_arg;
 u32  last_sleep_chan, last_sleep_from;
 u64  trace_len = 400;   /* --tracelen=N: PCs logged after a trap */

@@ -50,18 +50,28 @@ int main(int argc, char **argv)
             trace_traps = 0; quiet_uproc = 1;
             limit = ~0ull;
         }
-        else if (!strncmp(argv[i], "--uprog=", 8))     { uprog_path = argv[i]+8; deliver_traps = 1; trace_traps = 1; }
+        else if (!strncmp(argv[i], "--uprog=", 8))     { uprog_path = argv[i]+8; deliver_traps = 1; trace_traps = 1; debug = 1; }
         else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV) uargv[nuargv++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP) uenvp[nuenvp++] = argv[i] + 7;
-        /* --- output / diagnostics --- */
-        else if (!strcmp(argv[i], "--quiet"))      { trace_traps = 0; quiet_uproc = 1; }
+        /* --- output / diagnostics ---
+           ★ EVERY flag in this section that produces output also sets `debug`.
+           The emulator's own commentary is off by default now (see dbg() in
+           nx88.h), and a diagnostic flag whose output the same run then
+           swallowed would be a trap.  So asking for any of it asks for all of
+           it, which is also what these flags did before the gate existed --
+           no command line documented in BOOT.md prints less than it used to.
+           --quiet and --kmsg are the two that deliberately do NOT: --quiet
+           means be quiet, and --kmsg asks for the KERNEL's voice, which is
+           exactly the thing that is no longer buried. */
+        else if (!strcmp(argv[i], "--quiet"))      { trace_traps = 0; quiet_uproc = 1; debug = 0; }
+        else if (!strcmp(argv[i], "--debug"))      debug = 1;
         else if (!strcmp(argv[i], "--kmsg"))       kmsgs = 1;
-        else if (!strcmp(argv[i], "--scsitrace"))  scsi_trace = 1;
-        else if (!strcmp(argv[i], "--pchist"))     dump_pchist = 1;
-        else if (!strcmp(argv[i], "--profile"))    profile = 1;
-        else if (!strcmp(argv[i], "--vmprobe"))    vmprobe = 1;
-        else if (!strcmp(argv[i], "--vmexp"))      vmexp = 1;
-        else if (!strcmp(argv[i], "--ctxtrace"))   ctxtrace = 1;
+        else if (!strcmp(argv[i], "--scsitrace"))  { scsi_trace = 1; debug = 1; }
+        else if (!strcmp(argv[i], "--pchist"))     { dump_pchist = 1; debug = 1; }
+        else if (!strcmp(argv[i], "--profile"))    { profile = 1; debug = 1; }
+        else if (!strcmp(argv[i], "--vmprobe"))    { vmprobe = 1; debug = 1; }
+        else if (!strcmp(argv[i], "--vmexp"))      { vmexp = 1; debug = 1; }
+        else if (!strcmp(argv[i], "--ctxtrace"))   { ctxtrace = 1; debug = 1; }
         /* --handload=PATH: run a HOST a.out that is not in the guest filesystem
            at all -- the emulator loads the image into a real kernel process
            instead of letting the kernel's execve do it.  That is the ONLY thing
@@ -71,13 +81,14 @@ int main(int argc, char **argv)
            exactly why the flag was renamed. */
         else if (!strncmp(argv[i], "--handload=", 11))
             { procexp = 1; uprog_path = argv[i] + 11;
-              deliver_traps = 1; trace_traps = 1; }
-        else if (!strcmp(argv[i], "--procexp"))    procexp = 1;
+              deliver_traps = 1; trace_traps = 1; debug = 1; }
+        else if (!strcmp(argv[i], "--procexp"))    { procexp = 1; debug = 1; }
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
         else if (!strcmp(argv[i], "--init"))       run_init = 1;
         else if (!strncmp(argv[i], "--pwatch=", 9)) {
             char *e; pwatch_lo = (u32)strtoul(argv[i]+9, &e, 0);
             pwatch_hi = pwatch_lo + ((*e == ':') ? (u32)strtoul(e+1,0,0) : 4u);
+            debug = 1;
         }
         else if (!strncmp(argv[i], "--wmem=", 7)) {
             char *e;
@@ -85,19 +96,20 @@ int main(int argc, char **argv)
             u32 len = (*e == ':') ? (u32)strtoul(e + 1, &e, 0) : 0x100u;
             wmem_hi = wmem_lo + len;
             if (*e == ':') wmem_max = strtoull(e + 1, 0, 0);
+            debug = 1;
         }
         else if (!strncmp(argv[i], "--stwatch=", 10))
-            stwatch_pc = (u32)strtoul(argv[i] + 10, 0, 0);
+            { stwatch_pc = (u32)strtoul(argv[i] + 10, 0, 0); debug = 1; }
         else if (!strncmp(argv[i], "--regfind=", 10))
-            regfind_val = (u32)strtoul(argv[i] + 10, 0, 0);
-        else if (!strncmp(argv[i], "--traceat=", 10)) wtrace_at = strtoull(argv[i]+10,0,0);
-        else if (!strncmp(argv[i], "--wtrace=", 9)) wtrace_n = strtoull(argv[i]+9,0,0);
-        else if (!strncmp(argv[i], "--watch=", 8)) watch_pc = (u32)strtoul(argv[i]+8,0,0);
-        else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; }
+            { regfind_val = (u32)strtoul(argv[i] + 10, 0, 0); debug = 1; }
+        else if (!strncmp(argv[i], "--traceat=", 10)) { wtrace_at = strtoull(argv[i]+10,0,0); debug = 1; }
+        else if (!strncmp(argv[i], "--wtrace=", 9)) { wtrace_n = strtoull(argv[i]+9,0,0); debug = 1; }
+        else if (!strncmp(argv[i], "--watch=", 8)) { watch_pc = (u32)strtoul(argv[i]+8,0,0); debug = 1; }
+        else if (!strcmp(argv[i], "--trace-traps")) { deliver_traps = 1; trace_traps = 1; debug = 1; }
         else if (!strncmp(argv[i], "--tracelen=", 11)) trace_len = strtoull(argv[i]+11, 0, 0);
         else if (!strcmp(argv[i], "--no-console")) console_io = 0;
         else if (!strncmp(argv[i], "--console-port=", 15)) console_port = (int)strtoul(argv[i]+15, 0, 0);
-        else if (!strcmp(argv[i], "-v"))           verbose_sys = 1;
+        else if (!strcmp(argv[i], "-v"))           { verbose_sys = 1; debug = 1; }
         /* --- mode + non-option words --- */
         else if (!strcmp(argv[i], "sys"))  mode_sys = 1;
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
@@ -154,10 +166,20 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: nx88 user <binary> [args...] [-v] [--limit=N]\n"
                 "       nx88 sys  <vmunix> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
-                "                          [--uprog=PATH] [--handload=HOSTPATH]\n"
+                "                          [--debug] [--uprog=PATH]\n"
+                "                          [--handload=HOSTPATH]\n"
                 "                          [--nodes=N] [--identity]\n"
                 "                          [--tape=PATH] [--disk=PATH]\n"
                 "                          [--console-port=N]\n"
+                "  --debug      let the EMULATOR's own commentary out: the load\n"
+                "               map, the synthetic boot tables, the proc\n"
+                "               experiment, [kfall]/[halt]/[PANIC], the closing\n"
+                "               instruction count.  Off by default, so that what\n"
+                "               reaches the terminal is what the MACHINE said --\n"
+                "               the kernel's log (--kmsg) and the guest's own\n"
+                "               output.  Every other diagnostic flag below turns\n"
+                "               this on for itself; --quiet turns it back off.\n"
+                "  --kmsg       echo the kernel's own console log, prefixed [nx]\n"
                 "  --tape=PATH  root filesystem image (the tape's UFS; default:\n"
                 "               <vmunix-dir>.img, e.g. .../tapeimage.img)\n"
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
@@ -246,14 +268,14 @@ int main(int argc, char **argv)
         }
         root_img = fopen(root_img_path, "rb");
         if (root_img)
-            printf("root image: %s (open)\n", root_img_path);
+            dbg("root image: %s (open)\n", root_img_path);
         else
             fprintf(stderr, "root image: %s could not be opened (disk reads "
                     "will return zeros) -- pass --tape=PATH\n", root_img_path);
         /* SCSI disk (sd0) target -- read/write, must already exist */
         disk_img = fopen(disk_img_path, "r+b");
         if (disk_img) {
-            printf("disk image: %s (open, rw)\n", disk_img_path);
+            dbg("disk image: %s (open, rw)\n", disk_img_path);
             sd_ensure_label();
         }
         /* Host archive exposed to the guest at /hosttar (read-only). */
@@ -272,7 +294,7 @@ int main(int argc, char **argv)
                    the extra headroom is never actually read. */
                 hostfile_vsize = ((hostfile_size + 10239u) / 10240u) * 10240u
                                  + (4u << 20);         /* + 4 MiB of zeros */
-                printf("host file: %s (open, ro, %u bytes) -> guest /hosttar\n",
+                dbg("host file: %s (open, ro, %u bytes) -> guest /hosttar\n",
                        hostfile_path, hostfile_size);
             } else {
                 fprintf(stderr, "host file: %s could not be opened\n", hostfile_path);
