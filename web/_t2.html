@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBN TC2000 — nX in a browser</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='5' fill='%230d0f0e'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' fill='%237dff7d' text-anchor='middle'%3E%23%3C/text%3E%3C/svg%3E">
+
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="tc2000.css">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    padding: 32px 20px 64px;
+    background: #0b0d0c;
+    color: #b8ccbc;
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 26px; color: #e2f2e2; letter-spacing: -0.01em; }
+  .sub { margin: 0 0 28px; color: #7f9583; font-size: 14px; }
+  #machine { height: 560px; }
+  h2 { margin: 36px 0 10px; font-size: 15px; color: #cfe6d0; text-transform: uppercase; letter-spacing: 0.08em; }
+  p { margin: 0 0 12px; }
+  code, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+  code { color: #9fdca0; }
+  kbd { padding: 1px 5px; border: 1px solid #33403a; border-radius: 4px; background: #161a18; color: #cfe6d0; }
+  ul { margin: 0 0 12px; padding-left: 22px; }
+  li { margin: 3px 0; }
+  a { color: #8fdf7a; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 32px; }
+  .note { color: #7f9583; font-size: 13.5px; }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>BBN TC2000</h1>
+  <p class="sub">
+    An MC88100 emulator running nX — BBN&rsquo;s 4.3BSD for the Butterfly TC2000 —
+    booted from a 1989 install tape, compiled to WebAssembly.
+  </p>
+
+  <tc2000-console id="machine" autostart></tc2000-console>
+
+  <h2>What you are looking at</h2>
+  <p>
+    Pressing <b>Boot the machine</b> downloads the kernel and the tape&rsquo;s UFS
+    filesystem (about 9 MB), then starts the emulator at the kernel&rsquo;s entry
+    point. What scrolls past is the real boot sequence: the MC88100 coming up,
+    the 88200 CMMUs being programmed, the root filesystem getting mounted. When
+    it reaches the point where the swapper goes idle, the emulator starts
+    <code>/bin/sh</code> off the tape as a genuine nX process — real
+    <code>execve</code>, real page faults, real scheduler — and hands it the
+    terminal.
+  </p>
+
+  <h2>Things to try at the <code>#</code> prompt</h2>
+  <div class="cols">
+    <ul>
+      <li><code>ls /bin</code> — what shipped on the tape</li>
+      <li><code>cat /etc/motd</code></li>
+      <li><code>df</code> and <code>ls -l /dev</code></li>
+      <li><code>echo $PATH</code>, shell variables, pipelines</li>
+    </ul>
+    <ul>
+      <li><code>date</code> — 1989, as configured</li>
+      <li><code>grep vt100 /etc/termcap</code></li>
+      <li><kbd>Ctrl</kbd>+<kbd>D</kbd> — halt the machine</li>
+    </ul>
+  </div>
+  <p class="note">
+    The terminal is a fixed 80&times;24 VT100, because that is what the emulator
+    tells the guest it is; the whole thing is scaled to fit the box rather than
+    reflowed. The banner offers <code>exit</code> as well as <kbd>Ctrl</kbd>+<kbd>D</kbd>,
+    but this shell keeps going after <code>exit</code> — end-of-file is what
+    actually stops the machine, in the browser and natively alike.
+  </p>
+
+  <h2>Putting it in your own page</h2>
+  <p>Three tags and an element:</p>
+<pre style="overflow-x:auto;background:#121614;border:1px solid #262f2b;border-radius:6px;padding:14px"><code>&lt;link rel="stylesheet" href="vendor/xterm.css"&gt;
+&lt;link rel="stylesheet" href="tc2000.css"&gt;
+&lt;script src="vendor/xterm.js"&gt;&lt;/script&gt;
+&lt;script src="tc2000.js"&gt;&lt;/script&gt;
+
+&lt;tc2000-console style="height:560px"&gt;&lt;/tc2000-console&gt;</code></pre>
+  <p>
+    Add <code>autostart</code> to boot without the click. For the imperative
+    form, and for pointing the page at a different tape or a different
+    <code>nx88</code> command line, see <code>web/README.md</code>.
+  </p>
+
+</main>
+
+<script src="vendor/xterm.js"></script>
+<script src="tc2000.js"></script>
+<script>window.__s=document.getElementById("machine").session;window.__type=(t)=>{for(const c of t)__s.term.input(c,true)};</script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+/* tc2000.css -- chrome for the embedded machine.
+   Load vendor/xterm.css as well; that one styles the terminal itself. */
+
+.tc2000 {
+  --tc-bezel: #171a19;
+  --tc-edge:  #2c3230;
+  --tc-ink:   #8fb896;
+  --tc-glow:  #7dff7d;
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 240px;
+  background: var(--tc-bezel);
+  border: 1px solid var(--tc-edge);
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* The scaling viewport.  The stage inside it is always the natural size of an
+   80x24 terminal; the transform is what makes it fit.  See the note on COLS in
+   tc2000.js -- the geometry is fixed on purpose. */
+.tc2000-screen {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: #0d0f0e;
+}
+
+.tc2000-stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  transform-origin: center center;
+}
+
+.tc2000-term .xterm { padding: 8px; }
+.tc2000-term .xterm-viewport { background-color: transparent !important; }
+
+/* --------------------------------------------------------------- status bar */
+.tc2000-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--tc-edge);
+  background: linear-gradient(#1c201f, #141817);
+  color: var(--tc-ink);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.tc2000-lamp {
+  width: 8px; height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #3a423f;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.tc2000[data-phase="loading"] .tc2000-lamp { background: #d8a13a; box-shadow: 0 0 6px #d8a13a; }
+.tc2000[data-phase="running"] .tc2000-lamp { background: var(--tc-glow); box-shadow: 0 0 6px var(--tc-glow); }
+.tc2000[data-phase="halted"]  .tc2000-lamp { background: #c05a4a; box-shadow: 0 0 6px #c05a4a; }
+
+.tc2000-label { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.tc2000-meter {
+  flex: 0 0 140px;
+  height: 4px;
+  border-radius: 2px;
+  background: #2c3230;
+  overflow: hidden;
+}
+.tc2000-meter > i { display: block; height: 100%; width: 0; background: var(--tc-glow); transition: width 0.15s linear; }
+
+/* Deliberately quiet next to the overlay's primary button: this one sits a
+   few pixels from the terminal for the whole session, so it should not read
+   as the thing to click. */
+.tc2000-restart {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--tc-ink);
+  background: #232a27;
+  border: 1px solid #39433f;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tc2000-restart:hover  { background: #2e3733; border-color: #4a5751; color: #d8f0d4; }
+.tc2000-restart:active { background: #1c2220; }
+.tc2000-restart:focus-visible { outline: 2px solid var(--tc-glow); outline-offset: 1px; }
+/* Nothing to restart before the first boot -- the overlay offers that. */
+.tc2000[data-phase="idle"] .tc2000-restart { display: none; }
+
+/* ------------------------------------------------------------------ overlay */
+.tc2000-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(8, 10, 9, 0.86);
+  backdrop-filter: blur(2px);
+  color: var(--tc-ink);
+}
+.tc2000-overlay-title { font-size: 20px; font-weight: 600; color: #d8f0d4; }
+.tc2000-overlay-note  { font-size: 13px; max-width: 34em; line-height: 1.5; opacity: 0.85; }
+
+.tc2000-button {
+  margin-top: 6px;
+  padding: 9px 20px;
+  font: inherit;
+  font-size: 14px;
+  color: #0d0f0e;
+  background: var(--tc-glow);
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tc2000-button:hover { background: #a4ffa4; }
+.tc2000-button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tc2000-meter > i, .tc2000-lamp { transition: none; }
+}
