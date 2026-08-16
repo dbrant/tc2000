@@ -26,6 +26,7 @@
   #define con_closesock closesocket
 #else
   #include <termios.h>
+  #include <sys/ioctl.h>
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <netinet/tcp.h>
@@ -184,19 +185,20 @@ static u32 con_cook_line(u8 *dst, u32 cap)
    to give us for stdin lives here: a whole cooked line is buffered, then drained
    across as many guest reads as it takes -- the 1989 /bin/sh reads a byte at a
    time, so a line must survive many one-byte reads. */
+static u8  con_line[4100];      /* file scope so FIONREAD can see the leftovers */
+static u32 con_line_len, con_line_pos;
 static u32 con_sock_read(u8 *dst, u32 max)
 {
-    static u8  line[4100];
-    static u32 len, pos;
-    if (pos >= len) {                                 /* need a fresh line */
-        len = pos = 0;
-        u32 n = con_cook_line(line, sizeof line);
+    if (con_line_pos >= con_line_len) {               /* need a fresh line */
+        con_line_len = con_line_pos = 0;
+        u32 n = con_cook_line(con_line, sizeof con_line);
         if (n == 0) return 0;                         /* EOF (^D / disconnect) */
-        len = n;
+        con_line_len = n;
     }
-    u32 avail = len - pos, k = max < avail ? max : avail;
-    memcpy(dst, line + pos, k);
-    pos += k;
+    u32 avail = con_line_len - con_line_pos;
+    u32 k = max < avail ? max : avail;
+    memcpy(dst, con_line + con_line_pos, k);
+    con_line_pos += k;
     return k;
 }
 
@@ -252,7 +254,12 @@ void con_write_str(const char *s) { con_write((const u8 *)s, strlen(s), 0); }
 #define SG_RAW    0x20u
 
 static u8 tty_sg[6] = { 13, 13, 0x7f, 0x15, 0x00, SG_ECHO | 0x10 }; /* 9600,DEL,^U */
+/* tchars (TIOCGETC/TIOCSETC): intr quit start stop eof brk */
 static u8 tty_tc[6] = { 0x03, 0x1c, 0x11, 0x13, 0x04, 0xff };
+/* ltchars (TIOCGLTC/TIOCSLTC): susp dsusp rprnt flush werase lnext.  A SEPARATE
+   struct from tchars -- they were conflated here, see the ioctl switch. */
+static u8 tty_ltc[6] = { 0x1a, 0x19, 0x12, 0x0f, 0x17, 0x16 };
+static u32 tty_lmode;                      /* TIOCLGET/TIOCLSET local mode word */
 static u32 tty_flags(void) { return ((u32)tty_sg[4] << 8) | tty_sg[5]; }
 static int tty_is_raw(void) { return (tty_flags() & (SG_CBREAK | SG_RAW)) != 0; }
 
@@ -296,21 +303,81 @@ static void host_tty_mode(int raw)
 #endif
 }
 
-/* One byte, no line editing and no echo -- the read a game in CBREAK expects. */
+/* ★ How many input bytes can be had WITHOUT BLOCKING -- what FIONREAD answers.
+   GNU Emacs never issues a blocking read: it polls `ioctl(0, FIONREAD)` and
+   only calls read() when that reports something waiting.  With FIONREAD
+   unimplemented it saw "no input" forever and ignored every keystroke while
+   still redrawing perfectly, because output was never the problem.
+
+   Exactness matters here, so this counts what WE hold as well as what the host
+   has: a pushed-back byte, then whatever the transport can produce right now.
+   For the socket that is a zero-timeout select, which is precise.  For stdio it
+   is a select on fd 0, which can under-report while bytes sit in stdio's own
+   buffer -- harmless in practice (the next keystroke re-reports them) and only
+   reachable on a non-tty stdin, since a raw-mode terminal delivers a byte at a
+   time. */
+/* Yield the host for a moment.  Used only when a guest poll found no input. */
+static void con_idle_nap(void)
+{
+#ifndef _WIN32
+    struct timeval tv = { 0, 2000 };            /* 2 ms */
+    select(0, 0, 0, 0, &tv);
+#else
+    Sleep(2);
+#endif
+}
+
+static u32 con_input_avail(void)
+{
+    u32 n = 0;
+    if (con_pushback >= 0) n++;
+    if (con_line_pos < con_line_len) n += con_line_len - con_line_pos;
+    if (con_eof) return n ? n : 1;          /* EOF is "readable": read returns 0 */
+    consock_t fd;
+    if (con_use_sock) {
+        con_ensure_client();
+        if (con_csock == CON_BADSOCK) return n;
+        fd = con_csock;
+    } else {
+#ifdef _WIN32
+        return n ? n : 1;   /* no cheap poll for a Windows console handle */
+#else
+        fd = 0;
+#endif
+    }
+#ifdef _WIN32
+    u_long cnt = 0;
+    if (ioctlsocket(fd, FIONREAD, &cnt) == 0) n += (u32)cnt;
+#else
+    int cnt = 0;
+    if (ioctl(fd, FIONREAD, &cnt) == 0 && cnt > 0) n += (u32)cnt;
+#endif
+    return n;
+}
+static int con_input_ready(void) { return con_input_avail() != 0; }
+
+/* No line editing and no echo -- the read a game in CBREAK expects.  Blocks for
+   the FIRST byte, then takes whatever else is ALREADY waiting, up to `max`.
+   ★ That tail matters for Emacs and nothing else: a cursor key arrives as the
+   three bytes ESC [ D, and Emacs can only tell a function key from a bare ESC
+   if the whole sequence comes back from one read().  Handing it one byte at a
+   time left it sitting in an unresolved ESC prefix, swallowing the keys that
+   followed.  Games are unaffected -- they ask for exactly 1 byte, so the drain
+   loop never runs. */
 static u32 con_read_raw(u8 *dst, u32 max)
 {
     con_ensure_client();
     if (!max) return 0;
-    if (con_use_sock) {
-        int b = con_in_byte();
-        if (b < 0) return 0;
-        dst[0] = (u8)b;
-        return 1;
+    int b = con_use_sock ? con_in_byte() : fgetc(stdin);
+    if (b < 0 || b == EOF) return 0;
+    dst[0] = (u8)b;
+    u32 n = 1;
+    while (n < max && con_input_ready()) {
+        int c = con_use_sock ? con_in_byte() : fgetc(stdin);
+        if (c < 0 || c == EOF) break;
+        dst[n++] = (u8)c;
     }
-    int c = fgetc(stdin);
-    if (c == EOF) return 0;
-    dst[0] = (u8)c;
-    return 1;
+    return n;
 }
 
 static u32 con_read_line(u8 *dst, u32 max)
@@ -524,10 +591,18 @@ int console_syscall(u32 sysno, u32 tpc)
         ret = (long)got;
         break;
     }
+    /* ★ 4.3BSD sgtty ioctls.  The encoding is _IO?('t', cmd, size), so the low
+       byte is the command number -- worth decoding rather than guessing, because
+       two of these were previously mislabelled AND conflated: 0x40067474 is
+       TIOCGLTC (ltchars, cmd 116), not TIOCGETC (cmd 18, 0x40067412).  The real
+       TIOCGETC/TIOCSETC fell through to the default arm, which reports success
+       WITHOUT filling the caller's buffer -- so a program that saves the tty
+       state on entry and restores it on exit was saving stack garbage.  Games
+       only ever touched the ltchars pair, which is why it never showed. */
     case 54:                                         /* ioctl(fd, ...)    */
         if (!fd_is_console(a0)) return 0;
         switch (a1) {
-        case 0x40067408:                               /* TIOCGETP sgttyb   */
+        case 0x40067408:                               /* TIOCGETP  sgttyb  */
             if (ubuf_fault(a2, 6, 1, tpc)) return 1;
             uwrite_mem(a2, tty_sg, 6);
             break;
@@ -537,14 +612,59 @@ int console_syscall(u32 sysno, u32 tpc)
             for (u32 i = 0; i < 6; i++) tty_sg[i] = mem_r8(translate(a2 + i, 0));
             host_tty_mode(tty_is_raw());
             break;
-        case 0x40067474:                               /* TIOCGETC tchars   */
+        case 0x40067412:                               /* TIOCGETC  tchars  */
             if (ubuf_fault(a2, 6, 1, tpc)) return 1;
             uwrite_mem(a2, tty_tc, 6);
             break;
-        case 0x80067475:                               /* TIOCSETC          */
+        case 0x80067411u:                              /* TIOCSETC          */
             if (ubuf_fault(a2, 6, 0, tpc)) return 1;
             for (u32 i = 0; i < 6; i++) tty_tc[i] = mem_r8(translate(a2 + i, 0));
             break;
+        case 0x40067474:                               /* TIOCGLTC  ltchars */
+            if (ubuf_fault(a2, 6, 1, tpc)) return 1;
+            uwrite_mem(a2, tty_ltc, 6);
+            break;
+        case 0x80067475u:                              /* TIOCSLTC          */
+            if (ubuf_fault(a2, 6, 0, tpc)) return 1;
+            for (u32 i = 0; i < 6; i++) tty_ltc[i] = mem_r8(translate(a2 + i, 0));
+            break;
+        case 0x4004747Cu: {                            /* TIOCLGET local word */
+            if (ubuf_fault(a2, 4, 1, tpc)) return 1;
+            u8 b[4] = { (u8)(tty_lmode >> 24), (u8)(tty_lmode >> 16),
+                        (u8)(tty_lmode >> 8),  (u8)tty_lmode };
+            uwrite_mem(a2, b, 4);
+            break;
+        }
+        case 0x8004747Du:                              /* TIOCLSET          */
+            if (ubuf_fault(a2, 4, 0, tpc)) return 1;
+            tty_lmode = 0;
+            for (u32 i = 0; i < 4; i++)
+                tty_lmode = (tty_lmode << 8) | mem_r8(translate(a2 + i, 0));
+            break;
+        case 0x40087468u: {                            /* TIOCGWINSZ        */
+            /* rows, cols, xpixels, ypixels -- halfwords.  Answering this with
+               a bare success left the caller reading uninitialised stack as its
+               window size; report the vt100 the termcap entry describes. */
+            if (ubuf_fault(a2, 8, 1, tpc)) return 1;
+            u8 b[8] = { 0, 24, 0, 80, 0, 0, 0, 0 };
+            uwrite_mem(a2, b, 8);
+            break;
+        }
+        case 0x4004667Fu: {                            /* FIONREAD          */
+            /* ★ THE ONE EMACS NEEDS.  It polls this and only read()s when it
+               reports something waiting, so leaving it unanswered made every
+               keystroke invisible while the screen still drew perfectly. */
+            if (ubuf_fault(a2, 4, 1, tpc)) return 1;
+            u32 n = con_input_avail();
+            u8 b[4] = { (u8)(n >> 24), (u8)(n >> 16), (u8)(n >> 8), (u8)n };
+            uwrite_mem(a2, b, 4);
+            /* A program that polls for input it does not have is a spin loop,
+               and this one runs the host flat out.  Nothing is pending and the
+               guest clock is driven by instructions, not wall time, so a short
+               nap here costs the guest nothing and the host a great deal. */
+            if (!n) con_idle_nap();
+            break;
+        }
         default: break;                                /* yes, it's a tty   */
         }
         ret = 0;
