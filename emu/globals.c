@@ -138,8 +138,8 @@ int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 int  interactive;      /* --shell: hand the terminal to /bin/sh */
 int  kmsgs;            /* --kmsg: echo the kernel's console output */
 int  debug;            /* --debug: let the EMULATOR's own commentary out */
-/* The kernel, when it was read out of the boot image's own filesystem rather
-   than from a host file -- see looks_like_ffs in main.c. */
+/* The kernel, read out of the boot image's own filesystem by main.c.  There is
+   no other source: a standalone kernel file on the host is not accepted. */
 u8  *kernel_img;
 u32  kernel_img_len;
 const char *kernel_path;   /* --kernel=PATH: which kernel, inside the image */
@@ -261,7 +261,6 @@ u32  host_off[64];                   /* per-fd byte offset into hostfile_img */
 const char *uargv[MAX_UARGV];
 const char *uenvp[MAX_UENVP];
 unsigned nuargv, nuenvp;
-const char *guest_root = "..";        /* extracted tape = the guest's / */
 
 /* Named replacements for the former anonymous-struct globals (see nx88.h). */
 DevMap devmap[512];

@@ -3,11 +3,11 @@
  * It was written to serve --diskmount in the synthetic process model, and when
  * that model went away it spent a while unlinked, kept only because it was the
  * one way to browse disk.img from the host.  It is back in the build for a
- * better reason: the tape image is a filesystem that CONTAINS THE KERNEL, so
- * with a reader for it the emulator needs no separate vmunix on the host at all
- * (see the `looks_like_ffs' path in main.c).  Verified on both images -- the
- * /vmunix read out of tapeimage.img is byte-for-byte the file that used to sit
- * beside it.
+ * better reason: the boot image is a filesystem that CONTAINS THE KERNEL, and
+ * this is what reads it out -- so the emulator takes one file and nothing else,
+ * and loading a standalone vmunix from the host is gone entirely.  Verified on
+ * both images; the /vmunix read out of tapeimage.img is byte-for-byte the file
+ * that used to sit beside it.
  *
  * ffs_read_file() takes only REGULAR files; directories return -1 by design.
  *

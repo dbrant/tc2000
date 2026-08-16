@@ -77,13 +77,14 @@ int main(int argc, char **argv)
            at all -- the emulator loads the image into a real kernel process
            instead of letting the kernel's execve do it.  That is the ONLY thing
            this mode still offers; everything else is better served by --uprog.
-           `--procexp` is the old spelling and stays as a hidden alias, but it
-           reads like `--procexec' and means close to the opposite, which is
-           exactly why the flag was renamed. */
+           It is also now the only way to reach the hand-load path at all: the
+           bare `--procexp' spelling used to get there without naming a program,
+           and fell back to loading <tape-dir>/bin/echo from the HOST -- which
+           needed a host-side copy of the guest filesystem, and there is no
+           longer any such thing. */
         else if (!strncmp(argv[i], "--handload=", 11))
             { procexp = 1; uprog_path = argv[i] + 11;
               deliver_traps = 1; trace_traps = 1; debug = 1; }
-        else if (!strcmp(argv[i], "--procexp"))    { procexp = 1; debug = 1; }
         else if (!strcmp(argv[i], "--dataphys"))   dataphys = 1;
         else if (!strcmp(argv[i], "--init"))       run_init = 1;
         else if (!strncmp(argv[i], "--pwatch=", 9)) {
@@ -230,19 +231,6 @@ int main(int argc, char **argv)
         translate_on = 1;
         ileave_stub  = 1;
         realmm = !identity_mode;
-        /* The directory the boot image sits in, which is what the legacy
-           host-side loader (bare --procexp) resolves its a.out against. */
-        static char gr[1024];
-        {
-            size_t n = strlen(path);
-            const char *b = path + n;
-            while (b > path && b[-1] != '/' && b[-1] != '\\') b--;
-            size_t dlen = (size_t)(b - path);
-            if (dlen > 1 && dlen < sizeof gr) {
-                memcpy(gr, path, dlen - 1); gr[dlen - 1] = 0;
-                guest_root = gr;
-            }
-        }
         /* --shell: everything else follows.  The path is a GUEST path now --
            the kernel's execve resolves it in its own namespace. */
         if (interactive && !uprog_path) {

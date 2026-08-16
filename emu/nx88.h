@@ -314,7 +314,6 @@ extern int fd_watch_disk;
 extern const char *uargv[];
 extern const char *uenvp[];
 extern unsigned nuargv, nuenvp;
-extern const char *guest_root ;
 
 
 /* -------------------------------------------- named-struct machine state */

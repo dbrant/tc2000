@@ -525,18 +525,14 @@ int proc_experiment(void)
        (user_vtop, c00ab278) reads the page tables at the physical addresses it
        believes in, which this emulator does not honour, so copyin of the exec
        path fails.  See the kernel-space coherence note below. */
+    /* The program to run.  --uprog/--shell name a GUEST path, which the
+       kernel's own execve resolves in its own namespace; --handload names a
+       HOST path, loaded here instead.  One variable, read according to which
+       route is taken: there is no longer a host-side mirror of the guest
+       filesystem, so there is nothing to translate between them. */
     static char gpath[1024];
-    const char *path = uprog_path ? uprog_path : "/bin/echo";
-    static char hostpath[1024];
-    {   /* the guest sees the tape directory as /, so strip the host prefix */
-        const char *g = path;
-        size_t gl = guest_root ? strlen(guest_root) : 0;
-        if (gl && !strncmp(g, guest_root, gl)) g += gl;
-        snprintf(gpath, sizeof gpath, "%s", *g == '/' ? g : "/bin/echo");
-        snprintf(hostpath, sizeof hostpath, "%s%s", guest_root ? guest_root : "",
-                 gpath);
-        if (!uprog_path) path = hostpath;
-    }
+    const char *path = uprog_path ? uprog_path : "/bin/sh";
+    snprintf(gpath, sizeof gpath, "%s", path);
     AOut a;
     u32 txtaddr = 0, txtoff = 0, dataddr = 0, datoff = 0, img_hi = 0x2000u;
     if (!procexec) {
