@@ -2,6 +2,9 @@
    Shared types, macros, hot inline accessors, and all
    cross-module declarations live in nx88.h. */
 #include "nx88.h"
+#ifdef __EMSCRIPTEN__
+  #include <emscripten.h>
+#endif
 
 /* Snapshot the kernel's process table: who exists, what state they are in, and
    what they are asleep on.  Printed with -v when the run stops, which is the
@@ -91,6 +94,15 @@ int run_sys(const char *path, u64 limit, u32 sig)
     #define PCH_N 65536
     static u32 pchist[PCH_N]; static unsigned pchpos = 0;
     while (cpu.count < limit) {
+#ifdef __EMSCRIPTEN__
+        /* Hand the worker's event loop a turn a few dozen times a second so the
+           boot log STREAMS to the page, instead of landing in one lump when the
+           kernel finally reads the console.  Asyncify unwinds and rewinds the
+           whole C stack here, which at once per 256k instructions is
+           unmeasurable -- and it is also what lets a stop request from the page
+           ever be seen. */
+        if ((cpu.count & 0x3FFFFull) == 0) emscripten_sleep(0);
+#endif
         pchist[pchpos++ & (PCH_N - 1)] = cpu.pc;
         /* --profile: where does the time actually GO?  --pchist keeps the last
            64k PCs and --wtrace a straight line from a trigger; neither answers

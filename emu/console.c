@@ -40,15 +40,82 @@
   #define TCP_NODELAY 1
 #endif
 
+#ifndef __EMSCRIPTEN__                      /* no sockets in the browser build */
 static consock_t con_lsock = CON_BADSOCK;   /* listening socket (--console-port) */
 static consock_t con_csock = CON_BADSOCK;   /* connected client, once accepted   */
+#endif
 static int       con_use_sock;              /* listener is up: route console here */
 static int       con_eof;                   /* client disconnected / EOF seen     */
 static int       con_pushback = -1;         /* one-byte input pushback            */
 
+#ifdef __EMSCRIPTEN__
+/* ---------------------------------------------------------------------------
+   ★ IN A BROWSER THE CONSOLE IS THE SOCKET ONE, not the stdio one.
+
+   The terminal emulator on the page (xterm.js, over a postMessage pipe) is the
+   twin of the telnet client --console-port serves: keystrokes arrive raw and
+   unechoed, and nothing on that wire cooks them.  Every part of the line
+   discipline a host tty used to hand the stdio console -- echo, backspace,
+   CR / CRLF -> LF, ONLCR on the way out -- has to happen in here.  So the web
+   build does not grow a third transport: it IS the socket transport, with
+   con_use_sock left on and only the two bottom-most primitives swapped.  Bytes
+   out go to the page; bytes in come from a ring the page fills.  con_cook_line,
+   the sgtty raw/cbreak switch and FIONREAD are then shared, unmodified, which
+   is what makes the games and Emacs behave the same in a tab as over telnet.
+
+   Blocking is the other half of the problem.  A guest read() with nothing typed
+   yet has to WAIT, and a browser tab cannot spin waiting -- the event loop it is
+   blocking is the same one that would deliver the keystroke.  -sASYNCIFY is the
+   way out: emscripten_sleep() unwinds the entire C stack back to the worker's
+   event loop and rewinds it when a key lands.  That is why there is no thread
+   and no SharedArrayBuffer here, and therefore no COOP/COEP response headers to
+   arrange -- the page is deployable as plain static files.  It costs little
+   because the syscall dispatch sits in run_sys and NOT inside step(): the call
+   graph emcc has to instrument stops short of the interpreter's hot loop.  */
+#include <emscripten.h>
+
+/* The page supplies nxWebOut; see web/nx88-worker.js. */
+EM_JS(void, nx_web_out, (const u8 *p, int n), {
+    nxWebOut(HEAPU8.subarray(p, p + n));
+});
+
+#define WEBIN_CAP 8192u                     /* power of two: index is & (CAP-1) */
+static u8  webin[WEBIN_CAP];
+static u32 webin_r, webin_w;                /* free-running counters            */
+static int webin_eof;                       /* the page closed the session      */
+
+/* Called from JS: keystrokes, and end-of-input. */
+EMSCRIPTEN_KEEPALIVE void nx_web_push(const u8 *p, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (webin_w - webin_r < WEBIN_CAP) webin[webin_w++ & (WEBIN_CAP - 1)] = p[i];
+}
+EMSCRIPTEN_KEEPALIVE void nx_web_eof(void) { webin_eof = 1; }
+
+static u32 web_avail(void) { return webin_w - webin_r; }
+
+/* Block for one typed byte.  Each nap returns to the event loop, which is the
+   only thing that can ever deliver the next one. */
+static int web_getc(void)
+{
+    while (webin_r == webin_w) {
+        if (webin_eof) return -1;
+        emscripten_sleep(4);
+    }
+    return webin[webin_r++ & (WEBIN_CAP - 1)];
+}
+#endif  /* __EMSCRIPTEN__ */
+
 /* Stand up the listener.  On any failure we warn and fall back to stdio. */
 void console_listen(int port)
 {
+#ifdef __EMSCRIPTEN__
+    /* The page is the only transport there is, so take the cooked path always
+       and never mind the port. */
+    (void)port;
+    con_use_sock = 1;
+    return;
+#else
     if (port <= 0) return;
     console_port = port;
 #ifdef _WIN32
@@ -81,10 +148,15 @@ void console_listen(int port)
     printf("console: listening on 127.0.0.1:%d -- connect a VT100/telnet client "
            "there for the interactive session (kernel log stays on stdout)\n", port);
     fflush(stdout);
+#endif  /* __EMSCRIPTEN__ */
 }
 
 static void con_send_raw(const void *p, size_t n)
 {
+#ifdef __EMSCRIPTEN__
+    nx_web_out((const u8 *)p, (int)n);
+    return;
+#else
     if (con_csock == CON_BADSOCK || con_eof) return;
     const char *b = (const char *)p;
     for (size_t off = 0; off < n; ) {
@@ -92,12 +164,16 @@ static void con_send_raw(const void *p, size_t n)
         if (r <= 0) { con_eof = 1; return; }
         off += (size_t)r;
     }
+#endif  /* __EMSCRIPTEN__ */
 }
 
 /* Block for the client on first console I/O, so the boot log reaches stdout
    first and the terminal shows the banner/prompt the moment it attaches. */
 static void con_ensure_client(void)
 {
+#ifdef __EMSCRIPTEN__
+    return;                                 /* the page is already attached */
+#else
     if (!con_use_sock || con_csock != CON_BADSOCK || con_eof) return;
     printf("console: waiting for a connection on port %d ...\n", console_port);
     fflush(stdout);
@@ -112,20 +188,30 @@ static void con_ensure_client(void)
     con_send_raw(nego, sizeof nego);
     printf("console: client connected on port %d.\n", console_port);
     fflush(stdout);
+#endif  /* __EMSCRIPTEN__ */
 }
 
 static int con_recv_raw(void)
 {
     if (con_pushback >= 0) { int b = con_pushback; con_pushback = -1; return b; }
+#ifdef __EMSCRIPTEN__
+    int b = web_getc();
+    if (b < 0) { con_eof = 1; return -1; }
+    return b;
+#else
     u8 b;
     int r = recv(con_csock, (char *)&b, 1, 0);
     if (r <= 0) { con_eof = 1; return -1; }
     return b;
+#endif
 }
 
 /* One input byte with telnet IAC sequences consumed. */
 static int con_in_byte(void)
 {
+#ifdef __EMSCRIPTEN__
+    return con_recv_raw();       /* nothing negotiates telnet on the page's wire */
+#else
     for (;;) {
         int b = con_recv_raw();
         if (b < 0) return -1;
@@ -148,6 +234,7 @@ static int con_in_byte(void)
         }
         /* other 2-byte IAC commands (NOP, DM, ...): swallow */
     }
+#endif  /* __EMSCRIPTEN__ */
 }
 
 /* Assemble one cooked line from the socket: server-side echo, backspace editing,
@@ -327,11 +414,16 @@ static void host_tty_mode(int raw)
    is a select on fd 0, which can under-report while bytes sit in stdio's own
    buffer -- harmless in practice (the next keystroke re-reports them) and only
    reachable on a non-tty stdin, since a raw-mode terminal delivers a byte at a
-   time. */
+   time.  In the browser it is exact for free: the ring IS the whole queue, and
+   nothing else on the page holds a byte we have not been handed. */
 /* Yield the host for a moment.  Used only when a guest poll found no input. */
 static void con_idle_nap(void)
 {
-#ifndef _WIN32
+#if defined(__EMSCRIPTEN__)
+    /* Doubly worth doing here: the nap IS the page's only chance to hand us the
+       keystroke the poller is waiting for. */
+    emscripten_sleep(2);
+#elif !defined(_WIN32)
     struct timeval tv = { 0, 2000 };            /* 2 ms */
     select(0, 0, 0, 0, &tv);
 #else
@@ -339,13 +431,19 @@ static void con_idle_nap(void)
 #endif
 }
 
+#ifndef __EMSCRIPTEN__
 static u32 con_std_buffered(void);
+#endif
 static u32 con_input_avail(void)
 {
     u32 n = 0;
     if (con_pushback >= 0) n++;
     if (con_line_pos < con_line_len) n += con_line_len - con_line_pos;
     if (con_eof) return n ? n : 1;          /* EOF is "readable": read returns 0 */
+#ifdef __EMSCRIPTEN__
+    n += web_avail();                       /* exact: we own the whole queue */
+    return (n || !webin_eof) ? n : 1;
+#else
     consock_t fd;
     if (con_use_sock) {
         con_ensure_client();
@@ -367,6 +465,7 @@ static u32 con_input_avail(void)
     if (ioctl(fd, FIONREAD, &cnt) == 0 && cnt > 0) n += (u32)cnt;
 #endif
     return n;
+#endif  /* __EMSCRIPTEN__ */
 }
 static int con_input_ready(void) { return con_input_avail() != 0; }
 
@@ -390,7 +489,9 @@ static int con_std_getc(void)
     }
     return con_std_buf[con_std_pos++];
 }
+#ifndef __EMSCRIPTEN__      /* the browser build counts its ring instead */
 static u32 con_std_buffered(void) { return con_std_len - con_std_pos; }
+#endif
 #else
 static int con_std_getc(void) { int c = fgetc(stdin); return c == EOF ? -1 : c; }
 static u32 con_std_buffered(void) { return 0; }
