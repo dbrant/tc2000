@@ -2,6 +2,14 @@
    Shared types, macros, hot inline accessors, and all
    cross-module declarations live in nx88.h. */
 #include "nx88.h"
+#ifdef _WIN32
+  #include <io.h>
+  #include <windows.h>
+  #define nx_isatty() _isatty(_fileno(stdout))
+#else
+  #include <unistd.h>
+  #define nx_isatty() isatty(fileno(stdout))
+#endif
 
 int main(int argc, char **argv)
 {
@@ -20,6 +28,7 @@ int main(int argc, char **argv)
     u64 limit = 200000000ull;
     u32 sig = 'A';                     /* node EEPROM signature: 16MB + vmebus present */
     int mode_sys = 0, identity_mode = 0, i = 1, tickdiv_set = 0;
+    int color_mode = 0;                  /* 0 auto, 1 --color, -1 --no-color */
     const char *path = NULL;
 
     /* Options may appear anywhere, including after the binary name, so parse
@@ -67,6 +76,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--quiet"))      { trace_traps = 0; quiet_uproc = 1; debug = 0; }
         else if (!strcmp(argv[i], "--debug"))      debug = 1;
         else if (!strcmp(argv[i], "--kmsg"))       kmsgs = 1;
+        else if (!strcmp(argv[i], "--color"))      color_mode =  1;
+        else if (!strcmp(argv[i], "--no-color"))   color_mode = -1;
         else if (!strcmp(argv[i], "--scsitrace"))  { scsi_trace = 1; debug = 1; }
         else if (!strcmp(argv[i], "--pchist"))     { dump_pchist = 1; debug = 1; }
         else if (!strcmp(argv[i], "--profile"))    { profile = 1; debug = 1; }
@@ -159,6 +170,27 @@ int main(int argc, char **argv)
        opt-in precisely so the clock-off instruction counts stay bit-exact;
        --tickdiv=N overrides the rate for experiments, including --tickdiv=0
        to get the old fast counter back with interrupts still on. */
+    /* ★ Colour the kernel log only when something is there to render it.
+       Auto means: a terminal, and NO_COLOR unset (the de-facto opt-out).
+       Redirected into a file it stays off, because escape codes in a saved boot
+       log are worse than no colour at all.
+
+       The browser is a terminal -- xterm.js renders this ANSI natively -- but it
+       does not look like one to isatty(): the page installs its own stdout
+       handler, which Emscripten backs with a character device rather than a tty.
+       So the page asks for it outright, with --color in its argument string. */
+    if (color_mode > 0) kmsg_color = 1;
+    else if (color_mode == 0 && !getenv("NO_COLOR") && nx_isatty()) kmsg_color = 1;
+#ifdef _WIN32
+    /* cmd.exe and older PowerShell need VT processing switched on by hand; a
+       non-console handle just fails here, harmlessly. */
+    if (kmsg_color) {
+        HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD m;
+        if (GetConsoleMode(h, &m))
+            SetConsoleMode(h, m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+#endif
     if (clock_irq && !tickdiv_set) tick_div = 1;
     /* One hardclock interval (10000 us, hz = 100) expressed in instructions. */
     if (!softint_period)
@@ -188,6 +220,11 @@ int main(int argc, char **argv)
                 "               output.  Every other diagnostic flag below turns\n"
                 "               this on for itself; --quiet turns it back off.\n"
                 "  --kmsg       echo the kernel's own console log, prefixed [nx]\n"
+                "  --color / --no-color   colour that log: the machine's\n"
+                "               identity bright white, anything that went wrong\n"
+                "               amber, the kernel's log() lines dim.  Default is\n"
+                "               on for a terminal, off when redirected; NO_COLOR\n"
+                "               in the environment also turns it off\n"
                 "  --tape=PATH  mount a DIFFERENT filesystem as root than the\n"
                 "               one booted from (default: the booted image)\n"
                 "               The boot image is opened READ-ONLY; change one\n"

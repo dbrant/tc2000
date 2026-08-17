@@ -235,6 +235,7 @@ extern u32 procexp_proc;
 extern int quiet_uproc;
 extern int interactive;
 extern int kmsgs;
+extern int kmsg_color;
 extern int debug;
 extern u8  *kernel_img;
 extern u32  kernel_img_len;

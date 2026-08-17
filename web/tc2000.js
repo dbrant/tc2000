@@ -40,7 +40,13 @@
        output ("nX Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989",
        the memory sizing, the VMEbus probe) rather than only the emulator's
        commentary about it. */
-    args: 'sys /boot.img --shell --kmsg --clock',
+    /* --color asks the EMULATOR to colour its kernel log, rather than the page
+       doing it: xterm.js renders the ANSI it emits natively, kmsg_line already
+       has each complete line in hand, and one implementation cannot drift out of
+       step with a second one.  --no-color, or dropping the flag, gives plain
+       text.  The palette is this terminal's `theme' below, so the colours stay
+       the page's to choose. */
+    args: 'sys /boot.img --shell --kmsg --clock --color',
     files: [
       { path: '/boot.img', url: 'data/boot.img', label: 'boot image' },
     ],

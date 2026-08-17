@@ -123,7 +123,29 @@ are assembled into lines separately and a syslog line is printed only when it
 isn't the one the console just showed. That yields each message exactly once,
 console and syslog alike.
 
-There is a **third** copy, and it is behind `--debug`. The kernel also queues
+**Colour.** The log is coloured on a real terminal: the machine's identity lines
+bold bright white, anything reporting a failure amber (the tape's hardware probes
+find plenty), and the kernel's own `log()` priority lines — `<6>` allocator sizes
+and internal bookkeeping — dimmed. The rules live in one function, `kmsg_sgr` in
+`kmsg.c`, and are deliberately the same three the browser page applies, so a boot
+log reads alike in either place.
+
+It is on only when something can render it: `--color` forces it, `--no-color` and
+`NO_COLOR=1` turn it off, and the default is on for a terminal and **off when
+redirected**, since escape codes in a saved boot log are worse than no colour.
+
+The browser build uses this same path rather than styling the log in JavaScript.
+xterm.js renders the ANSI natively, `kmsg_line` already holds each complete line
+where the page would have had to reassemble one out of arbitrary byte chunks, and
+one set of rules cannot drift out of step with a second. The page opts in with
+`--color` in its argument string, because it does not look like a terminal to
+`isatty()` — it installs its own stdout handler, which Emscripten backs with a
+character device rather than a tty.
+
+Only the `[nx]` log is ever coloured; the guest's own output is passed through
+untouched, which is why the shell banner mentions TC2000 and stays plain.
+
+There is a **third** copy of every message, and it is behind `--debug`. The kernel also queues
 every console message down the TCS mailbox ring to the front-end processor,
 which on a 512-node machine multiplexes all of them and so tags each line with
 its origin: `0.0.0   0: Probing for VMEbus`. It only appears with `--clock`,

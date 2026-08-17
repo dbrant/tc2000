@@ -85,7 +85,7 @@ machine.reboot();
 | option | default | |
 |---|---|---|
 | `mount` | *(required)* | element to take over |
-| `args` | `sys /boot.img --shell --kmsg --clock` | the `nx88` command line, verbatim — every flag in `emu/BOOT.md` works |
+| `args` | `sys /boot.img --shell --kmsg --clock --color` | the `nx88` command line, verbatim — every flag in `emu/BOOT.md` works |
 | `files` | the tape image | `[{path, url, label}]`, staged into the emulator's filesystem before it runs |
 | `base` | this script's directory | where `nx88.js`, `nx88-worker.js` and `data/` live |
 | `autostart` | `false` | skip the click-to-boot overlay |
@@ -101,6 +101,24 @@ Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989`. The emulator's own
 commentary is off (that is `--debug`), so what the page shows is what the
 machine said. To run something other than the shell, say
 `sys /boot.img --uprog=/usr/games/snake --kmsg`.
+
+### Colouring the kernel log
+
+The kernel log is coloured — the machine's identity lines bright white, anything
+reporting a failure amber, the kernel's `log()` priority lines dimmed. That is
+the **emulator** doing it, not this page: `--color` in `args` (on by default)
+makes `kmsg_line` wrap each line in ANSI, and xterm.js renders it natively.
+
+The page deliberately does *not* have its own rules. It once did, and they were
+redundant twice over: the C side already has each complete line in hand where
+this page would have had to reassemble one from arbitrary byte chunks, and two
+sets of rules in two languages could only drift apart. The palette is still
+yours — the codes are ordinary ANSI, so `theme` above chooses the actual hues.
+
+To change which lines get which colour, edit `kmsg_sgr` in `emu/kmsg.c`; to turn
+it off, drop `--color` from `args` (or pass `--no-color`). Only the `[nx]` log is
+ever touched: the guest's own output passes through byte for byte, which is why
+the shell banner contains "TC2000" and is not highlighted.
 
 ## Deploying
 

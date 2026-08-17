@@ -22,7 +22,7 @@ const verbose = process.argv.includes('-v');
    the other side of the --debug gate gets tested:
      NX_ARGS='sys /boot.img --shell --kmsg --debug' node selftest.js
    flips the "emulator stayed quiet" checks into "the commentary came back". */
-const ARGS = process.env.NX_ARGS || 'sys /boot.img --shell --kmsg';
+const ARGS = process.env.NX_ARGS || 'sys /boot.img --shell --kmsg --color';
 const emuDebug = /(^|\s)--debug(\s|$)/.test(ARGS);
 
 /* The session, as the terminal would see it. */

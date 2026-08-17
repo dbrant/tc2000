@@ -137,6 +137,7 @@ u32  regfind_val;      /* --regfind=V: log where a GPR first holds V */
 int  quiet_uproc;      /* --quiet: no per-syscall / per-process chatter */
 int  interactive;      /* --shell: hand the terminal to /bin/sh */
 int  kmsgs;            /* --kmsg: echo the kernel's console output */
+int  kmsg_color;       /* colour the [nx] log; resolved from --color/isatty */
 int  debug;            /* --debug: let the EMULATOR's own commentary out */
 /* The kernel, read out of the boot image's own filesystem by main.c.  There is
    no other source: a standalone kernel file on the host is not accepted. */
