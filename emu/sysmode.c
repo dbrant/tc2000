@@ -229,14 +229,23 @@ int run_sys(const char *path, u64 limit, u32 sig)
                I/O, and calling it from here (proc0 parked on the idle sentinel,
                which never yields to the scheduler) just runs away -- measured,
                30M instructions and no return.  It has to run as a real process,
-               so the guest has to ask for it.  Say so loudly instead. */
+               so the guest has to ask for it.  Say so loudly instead.
+
+               ★ On stderr, NOT through dbg().  This is the one message that
+               predicts a specific failure in a FUTURE run, and it was briefly
+               swept behind --debug along with the emulator's ordinary
+               commentary -- which is precisely backwards: an unwarned user
+               meets it later as `ialloc: dup alloc' with nothing connecting the
+               panic to the run that caused it.  It stays with the other genuine
+               failures, unconditional. */
             if (disk_wrote && !fs_synced)
-                dbg("[disk] ★ WARNING: disk.img was written through the "
+                fprintf(stderr,
+                       "[disk] ★ WARNING: %s was written through the "
                        "buffer cache but the guest never ran sync or umount, so "
                        "dirty\n       filesystem metadata did NOT reach the "
                        "image.  A LATER run will panic `ialloc: dup alloc' or\n"
                        "       `free: freeing free block'.  End the script with "
-                       "`/etc/umount /mnt' (or `sync').\n");
+                       "`/etc/umount /mnt' (or `sync').\n", disk_img_path);
             if (interactive)
                 dbg("\n[halt] shell exited -- machine halted.\n");
             else

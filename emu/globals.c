@@ -218,6 +218,15 @@ int skip_synchrtc = 1;         /* skip meaningless cross-node RTC sync */
    NULL means "the image we booted" -- main.c fills it in; --tape=PATH sets it
    to something else, which is the only way root and boot media differ. */
 const char *root_img_path;
+/* ★ Opened READ-ONLY, and the write-back in cpu.c is gated on the device not
+   being the root.  That is not squeamishness about the tape: the emulator
+   services block I/O synchronously at the point the kernel WAITS for it, so a
+   write nothing waits on never reaches an intercept.  `sync' on a mounted root
+   issues async writes and returns, and the machine stops before they drain --
+   measured, exactly two blocks land (superblock and one inode) and no file data
+   at all, which would leave files present, correctly sized and full of NULs.
+   Writing to an image is done the way it is built: mount it as sd0b from
+   another boot and `umount', which waits. */
 FILE *root_img;
 /* SCSI disk (sd0 = the install target) backing.  The SHA target-0 model routes
    READ/WRITE block I/O here; blank at first, newfs populates it. */

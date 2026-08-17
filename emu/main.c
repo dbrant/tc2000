@@ -190,6 +190,8 @@ int main(int argc, char **argv)
                 "  --kmsg       echo the kernel's own console log, prefixed [nx]\n"
                 "  --tape=PATH  mount a DIFFERENT filesystem as root than the\n"
                 "               one booted from (default: the booted image)\n"
+                "               The boot image is opened READ-ONLY; change one\n"
+                "               by attaching it as --disk from another boot.\n"
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
                 "  --hostfile=PATH  expose a host file to the guest at /hosttar\n"
                 "               read-only (e.g. `tar xpf /hosttar` in the guest)\n"
@@ -283,7 +285,7 @@ int main(int argc, char **argv)
         /* The booted image is its own root filesystem unless --tape says else. */
         if (!root_img_path) root_img_path = path;
 
-        root_img = fopen(root_img_path, "rb");
+        root_img = fopen(root_img_path, "rb");   /* read-only: see globals.c */
         if (root_img)
             dbg("root image: %s (open)\n", root_img_path);
         else
