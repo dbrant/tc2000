@@ -20,9 +20,9 @@ const verbose = process.argv.includes('-v');
 
 /* The page's own command line by default.  NX_ARGS overrides it, which is how
    the other side of the --debug gate gets tested:
-     NX_ARGS='sys /tapeimage/vmunix --shell --kmsg --debug' node selftest.js
+     NX_ARGS='sys /boot.img --shell --kmsg --debug' node selftest.js
    flips the "emulator stayed quiet" checks into "the commentary came back". */
-const ARGS = process.env.NX_ARGS || 'sys /tapeimage.img --shell --kmsg';
+const ARGS = process.env.NX_ARGS || 'sys /boot.img --shell --kmsg';
 const emuDebug = /(^|\s)--debug(\s|$)/.test(ARGS);
 
 /* The session, as the terminal would see it. */
@@ -66,7 +66,7 @@ const SCRIPT = [
   /* The very file the page fetches, at the very path the worker stages it to.
      Just the one: the kernel lives inside this filesystem and the emulator
      reads it out of there. */
-  for (const [src, dst] of [[path.join(__dirname, 'data', 'tapeimage.img'), '/tapeimage.img']]) {
+  for (const [src, dst] of [[path.join(__dirname, 'data', 'boot.img'), '/boot.img']]) {
     if (!fs.existsSync(src)) {
       console.error(`missing ${src} -- run ./build.sh first`);
       process.exit(2);

@@ -134,7 +134,7 @@ async function start(msg) {
   /* The images go into Emscripten's in-memory filesystem at the paths the
      emulator expects.  It derives the root image's name from the kernel's:
      <dir>/vmunix -> <dir>.img (see main.c), so these two names are not
-     independent -- /tapeimage/vmunix is what makes it look for /tapeimage.img. */
+     independent. */
   const stage = (path, bytes) => {
     const dir = path.slice(0, path.lastIndexOf('/'));
     if (dir) try { Module.FS.mkdirTree(dir); } catch (e) { /* already there */ }

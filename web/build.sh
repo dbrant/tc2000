@@ -9,11 +9,11 @@
 #
 # Everything this writes is generated and gitignored:
 #   nx88.js  nx88.wasm            the emulator
-#   data/tapeimage.img            the tape, fetched by the worker at boot;
-#                                 the kernel is read out of it, not staged
+#   data/boot.img                 the boot image, fetched by the worker at boot;
+#                                 the kernel is read out of it.
 #
 # The source list is emu/build.sh's plus web.c (the browser entry point).
-# ffs.c is in both -- it is what reads the kernel out of the tape image.
+# ffs.c is in both -- it is what reads the kernel out of the boot image.
 # No winsock: console.c's
 # socket transport compiles out entirely under __EMSCRIPTEN__, replaced by the
 # postMessage one; the note at the top of that file explains why the browser
@@ -24,11 +24,11 @@ cd "$(dirname "$0")"
 EMU=../emu
 : "${EMCC:=emcc}"
 
-# The ONE file the page needs.  The tape image is a filesystem that contains
+# The ONE file the page needs.  The boot image is a filesystem that contains
 # the kernel, and the emulator reads it out of there (looks_like_ffs in
 # main.c), so there is no vmunix to stage alongside it -- 1.2 MB less to
 # download, and one less thing to keep in step.
-TAPE_IMG=../tapeimage.img
+BOOT_IMG=../boot.img
 
 SRCS="globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c ffs.c \
       usermode.c console.c proc.c sysmode.c main.c web.c"
@@ -79,23 +79,23 @@ echo "compiling nx88.wasm ..."
 # shellcheck disable=SC2086
 (cd "$EMU" && exec $EMCC $CFLAGS $SRCS -o ../web/nx88.js $LINKFLAGS)
 
-# Stage the one host file the emulator opens: the tape's UFS, which it mounts as
+# Stage the one host file the emulator opens: the boot image's UFS, which it mounts as
 # root AND reads the kernel out of.  (disk.img, the SCSI install target, is
 # deliberately NOT here -- it is 256 MB and nothing in the --shell demo touches
 # it.  The emulator runs fine without one.)
 mkdir -p data
 rm -f data/vmunix                 # from before the kernel came out of the image
-if [ ! -f "$TAPE_IMG" ]; then
-    echo "MISSING: $TAPE_IMG -- see emu/BOOT.md" >&2
+if [ ! -f "$BOOT_IMG" ]; then
+    echo "MISSING: $BOOT_IMG -- see emu/BOOT.md" >&2
     exit 1
 fi
-if [ ! -f data/tapeimage.img ] || [ "$TAPE_IMG" -nt data/tapeimage.img ]; then
-    echo "staging $TAPE_IMG -> data/tapeimage.img"
-    cp "$TAPE_IMG" data/tapeimage.img
+if [ ! -f data/boot.img ] || [ "$BOOT_IMG" -nt data/boot.img ]; then
+    echo "staging $BOOT_IMG -> data/boot.img"
+    cp "$BOOT_IMG" data/boot.img
 fi
 
 echo
 echo "built:"
-ls -l nx88.js nx88.wasm data/tapeimage.img | awk '{printf "  %10s  %s\n", $5, $9}'
+ls -l nx88.js nx88.wasm data/boot.img | awk '{printf "  %10s  %s\n", $5, $9}'
 echo
 echo "now run ./serve.py and open http://localhost:8000/"

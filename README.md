@@ -37,22 +37,15 @@ dumped tape image, `tapeimage.img`.
 ./emu/nx88.exe sys tapeimage.img --shell --kmsg
 ```
 
-That is the whole machine in one file. The image is a 4.3BSD filesystem and the
+That is the whole machine in one file. The image is a 4.3 BSD filesystem and the
 kernel is a file inside it, so the emulator reads `/vmunix` out of the image and
-then mounts that same image as root — there is no separate kernel to keep
-alongside it. `--kernel=PATH` boots a different one from within the image.
+then mounts that same image as root. `--kernel=PATH` boots a different one from
+within the image.
 
-`--shell` boots the kernel and hands your terminal to `/bin/sh` off the 1989
-tape; `--kmsg` shows the kernel's own console log. The kernel reaches a mounted
+`--shell` boots the kernel and hands your terminal to `/bin/sh` off the boot
+image; `--kmsg` shows the kernel's own console log. The kernel reaches a mounted
 root in about 3.7 million emulated instructions, which at ~25 million
 instructions/second is a fraction of a second.
-
-A standalone kernel file is not accepted: the image already carries a
-byte-identical copy, so the only thing a separate one added was a root
-filesystem that had to be *guessed* from the kernel's path — and guessed wrong
-whenever the two were not laid out as expected, failing thousands of
-instructions later as `cannot mount root`. `--tape=PATH` mounts a different
-filesystem as root than the one booted from.
 
 ```
 # ls /bin
@@ -71,7 +64,7 @@ The filesystem is genuinely the tape's UFS, read block by block through the
 kernel's own code, so only what shipped on the installer is there. **Ctrl-D**
 halts the machine (`exit` will not — this shell runs it and carries on).
 
-On Windows, build under MSYS2 UCRT64:
+On Windows, build under MSYS2:
 `export PATH="/c/msys64/ucrt64/bin:$PATH"`. The binary is called `nx88.exe` on
 every platform so the commands in [`emu/BOOT.md`](emu/BOOT.md) work unchanged.
 

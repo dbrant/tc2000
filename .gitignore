@@ -4,7 +4,7 @@
 *.obj
 
 # WebAssembly build output -- regenerate with web/build.sh.  data/ is staged
-# copies of tapeimage/vmunix and tapeimage.img, so it is 9 MB of duplicate.
+# binary boot images.
 web/nx88.js
 web/nx88.wasm
 web/data/

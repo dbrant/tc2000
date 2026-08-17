@@ -34,7 +34,7 @@ of wasm) and stages the one host file the emulator opens into `data/`:
 
 | file | what it is |
 |---|---|
-| `data/tapeimage.img` | the tape's filesystem — 7.5 MB. Mounted as root, *and* the kernel is read out of it (`/vmunix`), so there is nothing else to stage |
+| `data/boot.img` | the bootable filesystem, whether it came from a bootable tape (the original tapeimage.img, or another boot disk). Mounted as root, and the kernel is read out of it (`/vmunix`) |
 
 `disk.img` is deliberately not staged. It is the 256 MB SCSI install target and
 nothing in the shell demo touches it; the emulator runs fine without one.
@@ -85,7 +85,7 @@ machine.reboot();
 | option | default | |
 |---|---|---|
 | `mount` | *(required)* | element to take over |
-| `args` | `sys /tapeimage.img --shell --kmsg` | the `nx88` command line, verbatim — every flag in `emu/BOOT.md` works |
+| `args` | `sys /boot.img --shell --kmsg --clock` | the `nx88` command line, verbatim — every flag in `emu/BOOT.md` works |
 | `files` | the tape image | `[{path, url, label}]`, staged into the emulator's filesystem before it runs |
 | `base` | this script's directory | where `nx88.js`, `nx88-worker.js` and `data/` live |
 | `autostart` | `false` | skip the click-to-boot overlay |
@@ -100,7 +100,7 @@ kernel's own console output — the memory sizing, the VMEbus probe, `nX
 Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989`. The emulator's own
 commentary is off (that is `--debug`), so what the page shows is what the
 machine said. To run something other than the shell, say
-`sys /tapeimage.img --uprog=/usr/games/snake --kmsg`.
+`sys /boot.img --uprog=/usr/games/snake --kmsg`.
 
 ## Deploying
 
@@ -113,7 +113,7 @@ actually picked up, and Range requests for the 7 MB tape image.
 
 `file://` will not work: the page starts a Worker and fetches the image.
 
-Serve `data/tapeimage.img` with compression if you can — it is mostly empty
+Serve `data/boot.img` with compression if you can — it is mostly empty
 filesystem and gzips to a fraction of its size.
 
 ---
