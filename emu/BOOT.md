@@ -123,6 +123,17 @@ are assembled into lines separately and a syslog line is printed only when it
 isn't the one the console just showed. That yields each message exactly once,
 console and syslog alike.
 
+There is a **third** copy, and it is behind `--debug`. The kernel also queues
+every console message down the TCS mailbox ring to the front-end processor,
+which on a 512-node machine multiplexes all of them and so tags each line with
+its origin: `0.0.0   0: Probing for VMEbus`. It only appears with `--clock`,
+because the ring is drained from `_hps_poll` — software interrupt source 14 —
+and nothing dispatches software interrupts until the clock runs. Being the same
+text a second time, it would double the whole boot log under `--kmsg`, so it
+lives with the emulator's other hardware-level commentary. Note that the *drain*
+is unconditional whatever the flags: `_outputwakeup` spins until the consumer
+index catches the producer.
+
 ### An interactive shell
 
 ```sh

@@ -75,12 +75,26 @@ void memop(u32 sub, u32 D, u32 ea)
        reached from _hps_poll -- software interrupt source 14 -- and no software
        interrupt was ever dispatched at all.  Model the front end the same way
        the SHA is modelled: it drains instantly, so the consumer index is
-       always caught up with the producer.  --kmsg shows what it drained. */
+       always caught up with the producer.
+
+       ★ What comes out of it is the console log AGAIN.  The kernel writes each
+       message twice: once through putchar (which --kmsg hooks and prefixes
+       "[nx]") and once down here to the front end, which on a 512-node machine
+       multiplexes every node's output and so labels each line with its
+       Bay.Midplane.Node and CPU -- "0.0.0   0: Probing for VMEbus".  Identical
+       text by a second route, and only visible with --clock, since without
+       interrupt delivery _hps_poll never runs to drain the ring at all.  So it
+       belongs behind --debug: this is the emulated FRONT END talking, not the
+       kernel, and doubling every boot message is not what --kmsg is for.
+
+       The drain itself is NOT conditional.  Whether or not anyone is listening,
+       the consumer index has to keep up with the producer or _outputwakeup
+       (c009d888) spins on `while (cons != prod)' forever. */
     if (sysmode && ea == HPS_RING_CONS && (sub == 0x03 || sub == 0x07)) {
         u8 cons = mem_r8(HPS_RING_CONS), prod = mem_r8(HPS_RING_PROD);
         while (cons != prod) {
             u8 c = mem_r8(HPS_RING_BUF + cons);
-            if (kmsgs) putchar(c ? c : ' ');
+            if (debug) putchar(c ? c : ' ');
             cons = (u8)((cons + 1) & 0x7F);
         }
         mem_w8(HPS_RING_CONS, cons);
