@@ -741,8 +741,7 @@ int proc_experiment(void)
     dbg("  load_context(%08x): resuming as pid %u, entry %08x, sp %08x\n",
            ctx, kr32(p + P_PID) >> 16, a.entry, sp);
     if (interactive)
-        con_write_str("\nnX on the TC2000: -- vmunix running from an actual install "
-                      "tape from 1989.\n\n");
+        con_write_str("\nnX on the TC2000: starting /bin/sh...\n\n");
     return 1;
 }
 
