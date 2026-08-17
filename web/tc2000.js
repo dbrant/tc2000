@@ -40,9 +40,9 @@
        output ("nX Operating System (TC2000) #191: Tue Nov 28 18:33:02 1989",
        the memory sizing, the VMEbus probe) rather than only the emulator's
        commentary about it. */
-    args: 'sys /tapeimage.img --shell --kmsg',
+    args: 'sys /boot.img --shell --kmsg --clock',
     files: [
-      { path: '/tapeimage.img', url: 'data/tapeimage.img', label: 'install tape' },
+      { path: '/boot.img', url: 'data/boot.img', label: 'boot image' },
     ],
     autostart: false,
     fontSize: 15,
