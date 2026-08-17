@@ -182,6 +182,21 @@ A clean default run ends with:
 
 ### Populating and running from the SCSI disk
 
+**The disk can be any size.** `--disk=PATH` takes an image of whatever size you
+make it — `truncate`/`fsutil` a new one and attach it. nX's `newfs` refuses a
+disk whose label it cannot read ("Label style not understood yet"), so the
+emulator writes a synthetic Sun disklabel into block 0, and derives the
+geometry from the file: heads and sectors/track are a conventional 16 × 63, and
+the size lands in the cylinder count. That is recomputed on **every** attach and
+rewritten when it has gone stale, which is what lets an image be resized —
+otherwise a label written once describes whatever the file used to be, and
+growing a 64 MB image to 128 MB leaves half of it unreachable with nothing to
+say so. A label that already matches is left alone, byte for byte.
+
+The guest sees it: `newfs /dev/rsd0b` on a 32 MB image reports `65520 sectors in
+65 cylinders`, and on a 96 MB one `196560 sectors in 195 cylinders`. The ceiling
+is 2 GB, because the whole sd0 path seeks with `long` offsets.
+
 Once `newfs` + `mount` gave a real FFS on `disk.img`, three pieces let the guest
 fill it and run programs out of it:
 

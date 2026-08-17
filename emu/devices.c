@@ -186,9 +186,11 @@ void dev_write32(u32 a, u32 v)
     }
 }
 
-/* Factory-label the SCSI disk: if disk.img block 0 has no valid Sun disklabel,
-   write one, so newfs (which only understands "Mach" and "Sun" label styles)
-   reads a geometry it accepts instead of "Label style not understood yet".  The
+/* Factory-label the SCSI disk, so newfs (which only understands "Mach" and
+   "Sun" label styles) reads a geometry it accepts instead of "Label style not
+   understood yet".  Written when block 0 carries no valid Sun disklabel, and
+   re-written when the one there describes a different-sized disk than the image
+   actually is -- see the note in the body.  The
    Sun dk_label (512 bytes, big-endian): magic 0xDABE at 0x1FC, cksum at 0x1FE
    (all 256 shorts must XOR to 0), and the fields newfs actually reads --
    ncyl@0x1B0, nhead@0x1B4, nsect@0x1B6 -- plus the partition map dkl_map[8] at
@@ -196,18 +198,51 @@ void dev_write32(u32 a, u32 v)
 void sd_ensure_label(void)
 {
     if (!disk_img) return;
-    u8 lbl[512];
-    fseek(disk_img, 0, SEEK_SET);
-    if (fread(lbl, 1, 512, disk_img) == 512 &&
-        lbl[0x1FC] == 0xDA && lbl[0x1FD] == 0xBE)
-        return;                                       /* already labelled */
 
+    /* ★ The GEOMETRY FOLLOWS THE FILE, every time the image is attached.
+       heads and sectors/track are a conventional shape -- nothing here or in
+       the guest does anything with them but multiply them out -- so the image's
+       size lands entirely in the cylinder count.
+
+       Recomputing it on every attach, rather than only when no label is
+       present, is what makes `--disk=' work on an image of any size.  A label
+       written once and then trusted forever describes whatever the file used to
+       be: grow a 64 MB image to 128 MB and the old 130-cylinder label makes
+       half of it unreachable, silently, because nothing re-examines it.  The
+       label is ours in the first place -- the tape ships no `disklabel', so the
+       guest never writes one -- which is what makes rewriting it safe.  It is
+       block 0; the FFS superblock is at byte 8192 and is untouched. */
     fseek(disk_img, 0, SEEK_END);
     long sz = ftell(disk_img);
+    /* ftell is `long', so this whole path -- like every fseek in the sd0 model
+       -- tops out at 2 GB; past that the size comes back negative rather than
+       large, and a geometry computed from it would be nonsense. */
+    if (sz <= 0) {
+        fprintf(stderr, "disk image: cannot determine its size%s\n",
+                sz < 0 ? " (larger than 2 GB?)" : " (empty file)");
+        return;
+    }
     u16 nsect = 63, nhead = 16;
-    u32 ncyl = (u32)(sz / 512) / ((u32)nsect * nhead);
+    u32 percyl = (u32)nsect * nhead;                  /* 1008 blocks/cylinder */
+    u32 ncyl = (u32)(sz / 512) / percyl;
     if (!ncyl) ncyl = 1;
+    if (ncyl > 0xFFFF) {           /* ncyl is a 16-bit field in the label */
+        fprintf(stderr, "disk image: %ld bytes is larger than a Sun label can "
+                "describe; using the first %lu MB\n", sz,
+                (unsigned long)((u64)0xFFFF * percyl * 512 / (1u << 20)));
+        ncyl = 0xFFFF;
+    }
     u32 blocks = ncyl * nhead * nsect;
+
+    u8 lbl[512];
+    fseek(disk_img, 0, SEEK_SET);
+#define GET16(o) ((u16)(((u16)lbl[o] << 8) | lbl[(o)+1]))
+    int labelled = fread(lbl, 1, 512, disk_img) == 512 &&
+                   lbl[0x1FC] == 0xDA && lbl[0x1FD] == 0xBE;
+    if (labelled && GET16(0x1B0) == (u16)ncyl &&
+        GET16(0x1B4) == nhead && GET16(0x1B6) == nsect)
+        return;                            /* already describes THIS file */
+#undef GET16
 
     memset(lbl, 0, sizeof lbl);
     snprintf((char *)lbl, 128, "BBN emulated disk cyl %u alt 0 hd %u sec %u",
@@ -234,8 +269,10 @@ void sd_ensure_label(void)
     fseek(disk_img, 0, SEEK_SET);
     fwrite(lbl, 1, 512, disk_img);
     fflush(disk_img);
-    dbg("disk image: wrote synthetic Sun disklabel "
-           "(%u cyl x %u hd x %u sec = %u blocks)\n", ncyl, nhead, nsect, blocks);
+    dbg("disk image: %s synthetic Sun disklabel "
+        "(%u cyl x %u hd x %u sec = %u blocks, %lu MB of %ld)\n",
+        labelled ? "re-wrote stale" : "wrote", ncyl, nhead, nsect, blocks,
+        (unsigned long)((u64)blocks * 512 / (1u << 20)), sz);
 }
 
 /* Stand in for the SHA completion interrupt on the _sdcommand_nowait path.
