@@ -18,7 +18,7 @@ static int has_ci(const char *hay, const char *needle)
     return 0;
 }
 
-/* ★ Which lines get which colour.  These are the SAME three rules the page
+/* Which lines get which colour.  These are the SAME three rules the page
    applies (`highlight' in web/tc2000.js) and are meant to stay in step, so that
    a boot log read in a terminal and one read in a browser look alike:
 

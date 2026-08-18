@@ -38,7 +38,7 @@ u32  tick_scale = 2000;
    (--tickdiv=N overrides, including --tickdiv=0 to get the fast counter back
    with interrupts still on, which is the A/B for anything below.) */
 u32  tick_div;
-/* ★ The hardclock is a DEADLINE COMPARATOR, not a periodic tick.  Each time it
+/* The hardclock is a DEADLINE COMPARATOR, not a periodic tick.  Each time it
    fires, the ISR reads the free-running counter at 0xE07E8018, adds 0x2710
    (10000) and writes the sum to the compare register at 0xE07E0004
    (c00495e0-c00495ec); the hardware interrupts when the counter reaches that
@@ -203,7 +203,7 @@ int skip_synchrtc = 1;         /* skip meaningless cross-node RTC sync */
    NULL means "the image we booted" -- main.c fills it in; --root=PATH sets it
    to something else, which is the only way root and boot media differ. */
 const char *root_img_path;
-/* ★ Opened READ-ONLY, and cpu.c gates write-back on the device not being the
+/* Opened READ-ONLY, and cpu.c gates write-back on the device not being the
    root.  Not squeamishness about the tape: block I/O is serviced synchronously
    at the point the kernel WAITS for it, so a write nothing waits on never
    reaches an intercept.  `sync' on a mounted root issues async writes and

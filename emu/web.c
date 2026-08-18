@@ -8,7 +8,7 @@
 
 int main(int argc, char **argv);
 
-/* ★ The page does NOT start the emulator through Emscripten's callMain: under
+/* The page does NOT start the emulator through Emscripten's callMain: under
    -sASYNCIFY, main() unwinds at the guest's first console read and returns to
    JS long before the machine stops, losing the exit code and the "halted"
    moment.  An ordinary exported function lets the page use

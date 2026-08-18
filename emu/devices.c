@@ -62,7 +62,7 @@ void memop(u32 sub, u32 D, u32 ea)
         WR(D, mem_r16(ea) & ~1u);
         return;
     }
-    /* ★ THE DIAGNOSTIC OUTPUT RING -- and WE are the missing consumer.
+    /* THE DIAGNOSTIC OUTPUT RING -- and WE are the missing consumer.
        The node talks to the front-end through a 128-byte ring at 0xFE001818
        with a consumer index at 0xFE001802 and a producer index at 0xFE001803
        (measured: c009d304-c009d32c stores the byte at `base[prod]`, advances
@@ -77,7 +77,7 @@ void memop(u32 sub, u32 D, u32 ea)
        the SHA is modelled: it drains instantly, so the consumer index is
        always caught up with the producer.
 
-       ★ What comes out of it is the console log AGAIN.  The kernel writes each
+       What comes out of it is the console log AGAIN.  The kernel writes each
        message twice: once through putchar (which --kmsg hooks and prefixes
        "[nx]") and once down here to the front end, which on a 512-node machine
        multiplexes every node's output and so labels each line with its
@@ -213,7 +213,7 @@ void sd_ensure_label(void)
 {
     if (!disk_img) return;
 
-    /* ★ The GEOMETRY FOLLOWS THE FILE, on every attach.  Heads and
+    /* The GEOMETRY FOLLOWS THE FILE, on every attach.  Heads and
        sectors/track are a conventional shape -- nothing here or in the guest
        does more than multiply them out -- so the size lands entirely in the
        cylinder count.

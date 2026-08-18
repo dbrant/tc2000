@@ -61,7 +61,7 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV) uargv[nuargv++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP) uenvp[nuenvp++] = argv[i] + 7;
         /* --- output / diagnostics ---
-           ★ Every flag here that produces output also sets `debug` (see dbg()
+           Every flag here that produces output also sets `debug` (see dbg()
            in nx88.h): a diagnostic flag whose output the same run then
            swallowed would be a trap.  --quiet and --kmsg deliberately do not --
            --quiet means be quiet, and --kmsg asks for the KERNEL's voice. */
@@ -119,7 +119,7 @@ int main(int argc, char **argv)
        own to select the hand-load path instead, so do not override that one. */
     if ((uprog_path || interactive) && !procexp) { procexp = 1; procexec = 1; }
 
-    /* ★ procexp ALWAYS implies real MC88100 access-fault delivery and
+    /* procexp ALWAYS implies real MC88100 access-fault delivery and
        per-process u-areas; neither is optional, and the branches that need them
        test procexp directly.  Without per-process u-areas, curproc still names
        the parent after a fork and the first sleep panics.  Without real fault
@@ -141,7 +141,8 @@ int main(int argc, char **argv)
        opt-in precisely so the clock-off instruction counts stay bit-exact;
        --tickdiv=N overrides the rate for experiments, including --tickdiv=0
        to get the old fast counter back with interrupts still on. */
-    /* ★ Colour the kernel log only when something is there to render it.
+
+    /* Colour the kernel log only when something is there to render it.
        Auto means: a terminal, and NO_COLOR unset (the de-facto opt-out).
        Redirected into a file it stays off, because escape codes in a saved boot
        log are worse than no colour at all.

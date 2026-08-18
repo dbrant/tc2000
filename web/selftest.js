@@ -37,7 +37,7 @@ globalThis.nxWebOut = sink;
 /* What to type; each line is fed only once the guest asks for input, see the
    pump below.
 
-   ★ Lines end in CR, not LF, because that is what the browser sends: xterm
+   Lines end in CR, not LF, because that is what the browser sends: xterm
    emits one byte per keystroke and RETURN is a bare \r.  LF would skip the
    CR-pairing peek in con_cook_line entirely and test a path no user can reach.
    Each line is pushed as one batch too, so the CR is the last byte in the
@@ -73,7 +73,7 @@ const SCRIPT = [
     Module.FS.writeFile(dst, new Uint8Array(fs.readFileSync(src)));
   }
 
-  /* ★ Type the next line only once the PROMPT is back, the way a person does.
+  /* Type the next line only once the PROMPT is back, the way a person does.
      Waiting for the machine to merely go quiet is not good enough, and quietly
      hid a real bug: when a RETURN failed to be delivered, the next keystroke
      this pump sent was itself what unblocked the stuck read, so every command

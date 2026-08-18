@@ -50,7 +50,7 @@ static int       con_pushback = -1;         /* one-byte input pushback          
 
 #ifdef __EMSCRIPTEN__
 /* ---------------------------------------------------------------------------
-   ★ IN A BROWSER THE CONSOLE IS THE SOCKET ONE, not the stdio one.
+   IN A BROWSER THE CONSOLE IS THE SOCKET ONE, not the stdio one.
 
    xterm.js over a postMessage pipe is the twin of the telnet client
    --console-port serves: keystrokes arrive raw and unechoed, so the whole line
@@ -232,7 +232,7 @@ static int con_in_byte(void)
 #endif  /* __EMSCRIPTEN__ */
 }
 
-/* ★ May we block waiting for a CR's paired LF/NUL?
+/* May we block waiting for a CR's paired LF/NUL?
 
    On a telnet wire, yes: RFC 854 encodes a line ending as CR LF or CR NUL, so
    the second byte is already coming.  Reading it unconditionally is also
@@ -331,7 +331,7 @@ void con_write_str(const char *s) { con_write((const u8 *)s, strlen(s), 0); }
 
 
 /* ---------------------------------------------------------------------------
-   ★ TTY MODES -- what makes the curses games playable.
+   TTY MODES -- what makes the curses games playable.
 
    Answering every tty ioctl with a bare "success" and reading a COOKED LINE at
    a time is enough for a shell, but a game never sends the newline that would
@@ -391,7 +391,7 @@ static void host_tty_mode(int raw)
     }
     if (raw) {
         struct termios t = host_tio_save;
-        /* ★ The host must stop CHEWING THE INPUT, not just stop echoing it.
+        /* The host must stop CHEWING THE INPUT, not just stop echoing it.
            Clearing ICANON|ECHO alone left ICRNL on, so the host tty turned the
            RETURN key's CR into LF before the emulator ever saw it -- and a guest
            that asked for CBREAK with CRMOD *clear* (Emacs sets sg_flags 0x00c2:
@@ -416,7 +416,7 @@ static void host_tty_mode(int raw)
 #endif
 }
 
-/* ★ How many input bytes can be had WITHOUT BLOCKING -- what FIONREAD answers.
+/* How many input bytes can be had WITHOUT BLOCKING -- what FIONREAD answers.
    GNU Emacs never issues a blocking read: it polls `ioctl(0, FIONREAD)` and
    only calls read() when that reports something waiting.  With FIONREAD
    unimplemented it saw "no input" forever and ignored every keystroke while
@@ -483,7 +483,7 @@ static u32 con_input_avail(void)
 }
 static int con_input_ready(void) { return con_input_avail() != 0; }
 
-/* ★ The stdio console reads through OUR OWN buffer, not stdio's.
+/* The stdio console reads through OUR OWN buffer, not stdio's.
    FIONREAD has to be exact, and stdio's buffer is invisible to it: one `fgetc`
    pulls a whole burst of typing off the descriptor, so the kernel then reports
    "nothing available" while the rest of the keystrokes sit in libc.  A guest
@@ -513,13 +513,13 @@ static u32 con_std_buffered(void) { return 0; }
 
 /* No line editing and no echo -- the read a game in CBREAK expects.  Blocks for
    the FIRST byte, then takes whatever else is ALREADY waiting, up to `max`.
-   ★ That tail matters for Emacs and nothing else: a cursor key arrives as the
+   That tail matters for Emacs and nothing else: a cursor key arrives as the
    three bytes ESC [ D, and Emacs can only tell a function key from a bare ESC
    if the whole sequence comes back from one read().  Handing it one byte at a
    time left it sitting in an unresolved ESC prefix, swallowing the keys that
    followed.  Games are unaffected -- they ask for exactly 1 byte, so the drain
    loop never runs. */
-/* ★ One RETURN is one keystroke.  A telnet client transmits it as CR NUL or
+/* One RETURN is one keystroke.  A telnet client transmits it as CR NUL or
    CR LF (RFC 854) -- a line-ending ENCODING, not two keys -- and delivering the
    trailing byte raw handed the guest a spurious second keystroke: in Emacs's
    *scratch* that is C-@ (set-mark) or C-j (eval-print-last-sexp) after every
@@ -738,7 +738,7 @@ int console_syscall(u32 sysno, u32 tpc)
         if (!fd_is_console(a0)) return 0;
         u32 n = a2 > 4096 ? 4096 : a2;
         u8 tmp[4096];
-        /* ★ Pre-fault the destination BEFORE consuming any input.  uwrite_mem
+        /* Pre-fault the destination BEFORE consuming any input.  uwrite_mem
            stops at the first non-resident byte, so a read into a page the
            process has never touched transfers NOTHING and returns 0 -- which
            stdio latches as EOF -- while the line already taken off the host is
@@ -756,7 +756,7 @@ int console_syscall(u32 sysno, u32 tpc)
         ret = (long)got;
         break;
     }
-    /* ★ 4.3BSD sgtty ioctls.  The encoding is _IO?('t', cmd, size), so decode
+    /* 4.3BSD sgtty ioctls.  The encoding is _IO?('t', cmd, size), so decode
        the low byte rather than guessing: 0x40067474 is TIOCGLTC (ltchars, cmd
        116), NOT TIOCGETC (cmd 18, 0x40067412) -- they are easily conflated.
        Any that fall through to the default arm report success WITHOUT filling
@@ -814,7 +814,7 @@ int console_syscall(u32 sysno, u32 tpc)
             break;
         }
         case 0x4004667Fu: {                            /* FIONREAD          */
-            /* ★ THE ONE EMACS NEEDS.  It polls this and only read()s when it
+            /* THE ONE EMACS NEEDS.  It polls this and only read()s when it
                reports something waiting, so leaving it unanswered made every
                keystroke invisible while the screen still drew perfectly. */
             if (ubuf_fault(a2, 4, 1, tpc)) return 1;
@@ -841,7 +841,7 @@ int console_syscall(u32 sysno, u32 tpc)
 }
 
 /* ---------------------------------------------------------------------------
-   ★ PER-PROCESS descriptor flags.
+   PER-PROCESS descriptor flags.
 
    fd_console/fd_disk/fd_kernel say which fd NUMBERS the emulator answers for
    rather than the kernel.  They must be per-process: /bin/echo closes 0, 1 and

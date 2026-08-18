@@ -196,7 +196,7 @@ void tlb_flush(void)
     memset(tlb, 0, sizeof tlb);
 }
 
-/* ★ COPY-ON-WRITE.  MC88200 page descriptor bit 2 is WRITE PROTECT, and after
+/* COPY-ON-WRITE.  MC88200 page descriptor bit 2 is WRITE PROTECT, and after
    a fork the kernel maps parent and child at the SAME physical page with that
    bit set in both -- textbook COW.  Verified live: sh's stack page bfffde9c is
    PTE 00221001 before the fork and 00221045 in both address spaces after it,
@@ -227,7 +227,7 @@ static int cow_fault(u32 va)
     return 1;
 }
 
-/* ★ The kernel copies a physical page by mapping it into a fixed SCRATCH VA
+/* The kernel copies a physical page by mapping it into a fixed SCRATCH VA
    window and copying through it: pmap_copy_page (c00a7368) writes the two page
    descriptors at [0xC0014050] and [..]+4, then loads and stores through the VA
    pair based at [0xC0014058] -- 0xF8000000/0xF8001000 on this kernel.  That
@@ -260,7 +260,7 @@ u32 translate(u32 va, int code)
        the kernel mapped into kernel VA go through devmap; the rest is the fixed
        VA-KOFF direct map; >=0xE0000000 is identity device space. */
     if (realmm && va >= 0xC0000000u) {
-        /* ★ The u-area + kernel-stack window sits inside what is otherwise
+        /* The u-area + kernel-stack window sits inside what is otherwise
            identity device space, but it is the one kernel VA range that is
            PER-PROCESS.  load_context (c0017498) rewrites its four page-table
            descriptors from ctx+0x98 and then calls pmap_activate, so each
@@ -278,7 +278,7 @@ u32 translate(u32 va, int code)
             if (!(apr & 1) || !mmu_walk(apr, va, &pa, 0)) return va;
             return pa;
         }
-        /* ★ >=0xE0000000 is device space -- EXCEPT that the kernel also puts its
+        /* >=0xE0000000 is device space -- EXCEPT that the kernel also puts its
            PHYSICAL-ACCESS SCRATCH WINDOW up there.  pmap_copy_page (c00a7368)
            copies a page by writing the two descriptors at [0xC0014050] and
            [..]+4, then loading and storing through the pair of VAs at

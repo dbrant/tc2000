@@ -4,7 +4,7 @@
 #include "nx88.h"
 
 /* Read a NUL-terminated string out of user memory FOR THE EMULATOR's own use.
-   ★ It must not disturb the CPU's fault state.  translate() records a page
+   It must not disturb the CPU's fault state.  translate() records a page
    fault on a miss, and leaving that set makes the very next instruction bail
    and deliver a fault for an address the guest never touched.  That is exactly
    what wedged init: its child open()s a path whose page is not resident, the
@@ -56,7 +56,7 @@ u32 uwrite_mem(u32 va, const u8 *src, u32 n)
     return i;
 }
 
-/* ★ Make a user buffer resident before an emulator-serviced syscall touches it.
+/* Make a user buffer resident before an emulator-serviced syscall touches it.
    translate() records a page fault on a miss and returns 0 -- but only for the
    FIRST missing byte.  Once ufault_pending is set it stops taking that branch
    and falls through to `return cphys(va)`, which for a low user VA is the

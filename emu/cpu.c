@@ -198,7 +198,7 @@ void regfind_tick(u32 pc)
 #define KCALL_RET 0x00DEAD00u
 u32 kcall(u32 fn, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6)
 {
-    /* ★ No interrupts inside a kcall.  This is the emulator impersonating a
+    /* No interrupts inside a kcall.  This is the emulator impersonating a
        call into the kernel from the idle sentinel -- a context that is not a
        real thread and cannot be preempted safely.  Let a clock tick land in
        the middle and the callee blocks on a lock nobody will release: measured,
@@ -635,7 +635,7 @@ int proc_experiment(void)
     /* execve(path, argv, envp) -- syscall 59, number in r9, args in r2/r3/r4,
        trap 128; the kernel returns to pc+4 on error and pc+8 on success (which
        for a successful exec never happens -- it enters the new image instead). */
-    /* ★ Give the process REAL kernel descriptors 0/1/2 first.  The kernel's
+    /* Give the process REAL kernel descriptors 0/1/2 first.  The kernel's
        exec leaves u_ofile empty, so every descriptor call fails: /bin/sh does
        dup(2) to stash its input, gets -1, and then happily writes the command's
        output to fd 11 -- which nothing is listening to, so the shell ran
@@ -713,7 +713,7 @@ int proc_experiment(void)
     mem_w32(translate(ctx + 0x40, 0), sp);        /* r16 = user sp */
     mem_w32(translate(ctx + 0x80, 0), tramp);     /* resume PC */
     runq_remove(p);                               /* the scheduler's dequeue */
-    /* ★ Take every OTHER runnable process off the run queue.  Once the
+    /* Take every OTHER runnable process off the run queue.  Once the
        scheduler really works it finally dispatches init, which has sat
        runnable since boot; init forks a child that spins forever rescanning a
        directory (196k scans and counting) and starves the program we were
@@ -840,7 +840,7 @@ void deliver_exception(u32 vector)
        SXIP is INVALID (V=bit1 clear) and the resume point is SNIP.  Marking
        SXIP invalid is what lets the kernel's saveregs (which nulls SNIP and
        points SFIP at _hardclock_interface) fall through to SFIP on its rte. */
-    /* ★ No data transaction is outstanding at an instruction boundary, so the
+    /* No data transaction is outstanding at an instruction boundary, so the
        data pipeline registers must read EMPTY.  Leaving the DMT0 valid bit set
        from an earlier access fault makes the kernel's exreturn (c00aa3d4) --
        which runs for every exception, interrupts included -- believe it has a
@@ -1276,7 +1276,7 @@ int step(void)
 
        Also never inject an async interrupt while a synchronous fault is
        pending: the fault has to win, or it is lost and re-taken forever. */
-    /* ★ SOFTWARE INTERRUPTS ARE LEVEL-TRIGGERED.  The kernel requests one by
+    /* SOFTWARE INTERRUPTS ARE LEVEL-TRIGGERED.  The kernel requests one by
        setting a bit in the pending mask at 0xC00140CC (setsoftint, c00a7fd0);
        the ISR then dispatches every pending bit ABOVE the spl it interrupted
        (c00160a4-c00160c0: `dispatch = pending & ~((2 << spl) - 1)`) and stores
@@ -1299,7 +1299,7 @@ int step(void)
        work: when every process is asleep in sigpause, which is exactly when
        the timer must fire, nothing is in user mode at all.)
 
-       ★★ AND THE LINE HAS TO BE THE RIGHT ONE.  The controller's pending
+       AND THE LINE HAS TO BE THE RIGHT ONE.  The controller's pending
        register 0xE0780018 is decoded by source, and the ISR reaches its
        software-interrupt block ONLY through **bit 5**:
 
@@ -1334,7 +1334,7 @@ int step(void)
         }
     }
 
-    /* ★ THE HARDCLOCK IS A DEADLINE COMPARATOR, and once the free-running
+    /* THE HARDCLOCK IS A DEADLINE COMPARATOR, and once the free-running
        counter runs at a real microsecond rate we can finally use it as one.
        Each tick the ISR does (c00495e0-c00495ec) `deadline = counter + 10000`,
        i.e. hz = 100.  Pacing the tick off that register instead of off a fixed
@@ -1461,7 +1461,7 @@ int step(void)
         }
     } else if (op == 0x21) {                                          /* FPU */
         u32 fop = (w >> 11) & 0x1F;
-        /* ★ Operand-size fields: **T1 at 10-9, T2 at 8-7, TD at 6-5** -- the
+        /* Operand-size fields: **T1 at 10-9, T2 at 8-7, TD at 6-5** -- the
            documented MC88100 SFU1 layout.  Two traps, both silent:
 
            TD being the LOW pair is counter-intuitive.  Read it elsewhere and
@@ -1491,7 +1491,7 @@ int step(void)
         case 0x0B:                                               /* trnc (toward 0) */
             WR(D, (u32)(s32)trunc(fp_read(S2,t2))); break;
         case 0x07: {                                             /* fcmp */
-            /* ★ The condition bits sit at the SAME positions as the integer cmp
+            /* The condition bits sit at the SAME positions as the integer cmp
                (C_EQ=2 .. C_GE=7); only bits 0 and 1 differ -- nc (not
                comparable, i.e. a NaN) and cp (comparable).  Write them one bit
                low and every FP branch tests its neighbour: `bb1 4' for GT reads

@@ -45,7 +45,7 @@ function outByte(b) {
   else if (!outTimer) outTimer = setTimeout(flushOut, 0);
 }
 
-/* ★ The two streams arrive with DIFFERENT line endings, and a terminal is
+/* The two streams arrive with DIFFERENT line endings, and a terminal is
    unforgiving about it.  The guest's console output is already cooked: it goes
    through the emulator's ONLCR in con_sock_write, so its newlines are CR LF.
    The kernel log does not -- it is ordinary printf on stdout, and on a real

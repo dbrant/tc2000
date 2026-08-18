@@ -47,7 +47,7 @@ typedef uint64_t u64;
                                        per-level interrupt mask here */
 #define SOFTINT_PENDING 0xC00140CCu /* pending software-interrupt mask */
 #define IRQ_HARDCLOCK  0x40u        /* hardclock's bit in both regs   */
-/* ★ The SOFTWARE-interrupt line is a source of its own, bit 5.  The ISR tests
+/* The SOFTWARE-interrupt line is a source of its own, bit 5.  The ISR tests
    it explicitly (c0016088 `bb0 5`) and only then looks at SOFTINT_PENDING;
    every other bit of IRQ_SOURCE_REG is decoded through the table at
    0xC009CC08 (bits 7:4), where bit 6 means "work bit 27" = _hardclock.
@@ -243,7 +243,7 @@ extern const char *kernel_path;
 /* ffs.c -- read-only 4.3BSD FFS over a host-opened image. */
 int ffs_read_file(FILE *img, const char *path, u8 **buf, u32 *len);
 
-/* ★ EMULATOR COMMENTARY vs THE MACHINE'S OWN VOICE.
+/* EMULATOR COMMENTARY vs THE MACHINE'S OWN VOICE.
    What the GUEST says -- the kernel's log via kmsg_line's "[nx] ..." and the
    process's own writes through con_write -- is what someone running the machine
    came for.  What the EMULATOR says about it -- load map, synthetic boot

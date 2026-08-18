@@ -24,7 +24,7 @@
                new URL('tc2000.js', location.href).href;
   const BASE = new URL('.', SELF).href;
 
-  /* ★ 80x24, ALWAYS.  Not a style choice: the emulator answers the guest's
+  /* 80x24, ALWAYS.  Not a style choice: the emulator answers the guest's
      TIOCGWINSZ with a hard-coded 24x80 (console.c), and /etc/termcap on the
      tape describes a vt100.  A terminal of any other size would have the
      curses programs -- vi, the games -- drawing to coordinates that are not

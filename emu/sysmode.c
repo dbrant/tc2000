@@ -166,7 +166,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                     a2 = mem_r32(translate(a2 + 0x18u, 0));
                 if (a2 == procexp_proc) alive = 1;
             }
-            /* ★★ Let the KERNEL's own scheduler do the
+            /* Let the KERNEL's own scheduler do the
                dispatching -- no hand-dispatch at all.  proc0 is parked on a
                br-to-self here, so it never yields and the scheduler never gets
                a turn; that is the ONLY reason this hook ever had to pick a
@@ -208,7 +208,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 }
                 dbg("[procexp] scheduler made no progress -- deadlock?\n");
             }
-            /* ★ WARN ABOUT UNFLUSHED DISK WRITES.  This harness ends the moment
+            /* Warn about unflushed disk writes.  This harness ends the moment
                our process tree exits -- no shutdown, so the buffer cache can
                still hold dirty FFS metadata (CG block and inode bitmaps, the
                superblock summary, inodes).  That never reaches the image, and
@@ -226,7 +226,7 @@ int run_sys(const char *path, u64 limit, u32 sig)
                panic with nothing connecting it to the run that caused it. */
             if (disk_wrote && !fs_synced)
                 fprintf(stderr,
-                       "[disk] ★ WARNING: %s was written through the "
+                       "[disk] WARNING: %s was written through the "
                        "buffer cache but the guest never ran sync or umount, so "
                        "dirty\n       filesystem metadata did NOT reach the "
                        "image.  A LATER run will panic `ialloc: dup alloc' or\n"
