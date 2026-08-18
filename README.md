@@ -34,7 +34,7 @@ dumped tape image, `tapeimage.img`.
 
 ```sh
 ./emu/build.sh                                  # any C compiler; see below
-./emu/nx88.exe sys tapeimage.img --shell --kmsg
+./emu/nx88 sys tapeimage.img --shell --kmsg
 ```
 
 That is the whole machine in one file. The image is a 4.3 BSD filesystem and the
@@ -65,8 +65,10 @@ kernel's own code, so only what shipped on the installer is there. **Ctrl-D**
 halts the machine (`exit` will not — this shell runs it and carries on).
 
 On Windows, build under MSYS2:
-`export PATH="/c/msys64/ucrt64/bin:$PATH"`. The binary is called `nx88.exe` on
-every platform so the commands in [`emu/BOOT.md`](emu/BOOT.md) work unchanged.
+`export PATH="/c/msys64/ucrt64/bin:$PATH"`. The binary is `nx88.exe` there and
+plain `nx88` elsewhere, but every command in these docs is written `./nx88` and
+works on all three — MSYS, Cygwin, cmd and PowerShell all append the extension
+when resolving a program name.
 
 ---
 
@@ -143,9 +145,9 @@ nx88 user <binary> [args]       # run one m88k a.out with no kernel at all
 By default the emulator says **nothing**. What you see is what the machine said:
 
 ```sh
-./nx88.exe sys tapeimage.img --shell           # the guest only
-./nx88.exe sys tapeimage.img --shell --kmsg    # + the kernel's log
-./nx88.exe sys tapeimage.img --shell --debug   # + the emulator's commentary
+./nx88 sys tapeimage.img --shell           # the guest only
+./nx88 sys tapeimage.img --shell --kmsg    # + the kernel's log
+./nx88 sys tapeimage.img --shell --debug   # + the emulator's commentary
 ```
 
 `--debug` unlocks the load map, the synthetic boot tables, the process
@@ -187,7 +189,7 @@ the tool that cracked several blockers), `--watch=PC`, `--wtrace=N`,
 watchpoints — the second catches a bad translation scribbling over memory its VA
 never named), `--profile`, `--vmprobe`, `--ctxtrace`, `--scsitrace`.
 
-Run `./nx88.exe` with no arguments for the full list.
+Run `./nx88` with no arguments for the full list.
 
 ---
 

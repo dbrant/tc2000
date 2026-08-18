@@ -5,7 +5,7 @@
 #
 # e.g.  ./tools/mkrootdisk.sh newroot.img 24 games.tar
 #
-# The result boots on its own -- `./emu/nx88.exe sys newroot.img --shell' -- with
+# The result boots on its own -- `./emu/nx88 sys newroot.img --shell' -- with
 # no tape and no separate kernel, because the image carries /vmunix like the tape
 # does and the emulator reads it out of the filesystem it is about to mount.
 #
@@ -34,13 +34,17 @@ IMG=${1:-newroot.img}
 MB=${2:-24}
 shift 2 2>/dev/null || true
 
-NX=./emu/nx88.exe
+NX=./emu/nx88                      # ./emu/nx88.exe on Windows; see below
 TAPE=tapeimage.img
 TMP=${TMPDIR:-/tmp}/mkrootdisk.$$
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP"
 
-[ -x "$NX" ] || { echo "no $NX -- run emu/build.sh first" >&2; exit 1; }
+# The Windows build carries a .exe; -x on the bare name does not see it, even
+# though executing that name would work.
+[ -x "$NX" ] || [ -x "$NX.exe" ] || {
+    echo "no $NX -- run emu/build.sh first" >&2; exit 1; }
+[ -x "$NX" ] || NX="$NX.exe"
 [ -f "$TAPE" ] || { echo "no $TAPE" >&2; exit 1; }
 
 echo "creating $IMG (${MB} MB)"

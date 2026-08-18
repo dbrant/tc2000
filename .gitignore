@@ -3,8 +3,8 @@
 *.o
 *.obj
 
-# WebAssembly build output -- regenerate with web/build.sh.  data/ is staged
-# binary boot images.
+emu/nx88
+
 web/nx88.js
 web/nx88.wasm
 web/data/

@@ -24,7 +24,7 @@ valid node-local physical address, so the boot loader's map is essentially ident
 ```sh
 export PATH="/c/msys64/ucrt64/bin:$PATH"
 ./build.sh                                         # or: make
-./nx88.exe sys <path-to>/tapeimage.img             # the image IS the machine
+./nx88 sys <path-to>/tapeimage.img             # the image IS the machine
 ```
 
 The emulator is split by theme across a dozen small `.c` files plus a shared
@@ -38,7 +38,7 @@ The tape image is a filesystem, and `/vmunix` is a file inside it — so the ima
 alone is a complete machine:
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage.img --shell --kmsg
+./nx88 sys <path-to>/tapeimage.img --shell --kmsg
 ```
 
 The emulator reads the kernel out of the image through `ffs.c` and mounts that
@@ -75,9 +75,9 @@ kernel's log completely.
 All of the latter now goes through `dbg()` (see `nx88.h`) and needs `--debug`:
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage.img --shell           # the machine only
-./nx88.exe sys <path-to>/tapeimage.img --shell --kmsg    # + the kernel's log
-./nx88.exe sys <path-to>/tapeimage.img --shell --debug   # + everything else
+./nx88 sys <path-to>/tapeimage.img --shell           # the machine only
+./nx88 sys <path-to>/tapeimage.img --shell --kmsg    # + the kernel's log
+./nx88 sys <path-to>/tapeimage.img --shell --debug   # + everything else
 ```
 
 Every *other* diagnostic flag (`--trace-traps`, `--wmem=`, `--pwatch=`,
@@ -96,7 +96,7 @@ character passes through, rather than reconstructing messages from format
 strings. Combines with anything:
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage.img --shell --kmsg
+./nx88 sys <path-to>/tapeimage.img --shell --kmsg
 ```
 
 ```
@@ -159,7 +159,7 @@ index catches the producer.
 ### An interactive shell
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage.img --shell
+./nx88 sys <path-to>/tapeimage.img --shell
 ```
 
 boots the kernel and hands your terminal to `/bin/sh` off the 1989 tape:
@@ -192,7 +192,7 @@ the interactive session is served on a loopback TCP socket at `127.0.0.1:N` for 
 VT100/telnet client to attach to.
 
 ```sh
-./nx88.exe sys <path-to>/tapeimage.img --shell --console-port=2323 --kmsg
+./nx88 sys <path-to>/tapeimage.img --shell --console-port=2323 --kmsg
 # ...boot log on stdout... then in another window:
 telnet 127.0.0.1 2323        # or: nc 127.0.0.1 2323, or PuTTY (Raw/Telnet)
 ```

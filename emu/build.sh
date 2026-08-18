@@ -8,12 +8,6 @@
 # running nx88.exe holds a file lock there, so it is killed before linking, and
 # the telnet console needs winsock.  Neither applies on macOS/Linux.
 #
-# ffs.c IS in the link again: it is what lets `sys tapeimage.img' boot the
-# kernel out of the image's own filesystem, so no separate host vmunix is
-# needed.  See its header, and looks_like_ffs in main.c.
-#
-# The binary keeps the name nx88.exe on every platform so the commands in
-# BOOT.md (and everyone's shell history) work unchanged on both machines.
 set -e
 # The source list below is bare filenames, so the build has to run from here.
 # Anchoring to the script's own directory -- which web/build.sh and serve.py
@@ -22,16 +16,18 @@ cd "$(dirname "$0")"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
+        BIN=nx88.exe
         taskkill //F //IM nx88.exe >/dev/null 2>&1 || true
         LIBS="-lws2_32"
         ;;
     *)
+        BIN=nx88
         LIBS=""
         ;;
 esac
 
-${CC:-cc} -O2 -Wall -o nx88.exe \
+${CC:-cc} -O2 -Wall -o "$BIN" \
     globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c ffs.c \
     usermode.c console.c proc.c sysmode.c main.c \
     $LIBS
-echo "built nx88.exe"
+echo "built $BIN"

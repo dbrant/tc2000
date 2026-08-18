@@ -8,20 +8,31 @@
 CC      := gcc
 CFLAGS  := -O2 -Wall
 LDFLAGS :=
-LDLIBS  :=
 
 SRCS := globals.c memory.c devices.c mmu.c cpu.c aout.c kmsg.c ffs.c \
         usermode.c console.c proc.c sysmode.c main.c
 OBJS := $(SRCS:.c=.o)
 HDR  := nx88.h
-BIN  := nx88.exe
+
+# `.exe' on Windows only -- `./nx88' still finds it there, since MSYS/Cygwin and
+# PATHEXT both append the extension.  Windows also needs winsock, for the telnet
+# console in console.c
+ifeq ($(OS),Windows_NT)
+  BIN    := nx88.exe
+  LDLIBS := -lws2_32
+else
+  BIN    := nx88
+  LDLIBS :=
+endif
 
 .PHONY: all clean
 
 all: $(BIN)
 
 $(BIN): $(OBJS)
-	-@taskkill //F //IM nx88.exe >/dev/null 2>&1 || true
+ifeq ($(OS),Windows_NT)
+	-@taskkill //F //IM $(BIN) >/dev/null 2>&1 || true
+endif
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 
 %.o: %.c $(HDR)
