@@ -198,10 +198,9 @@ u64 softint_period;
 int sha_sync = 1;
 int biowait_sync = 1;
 int skip_synchrtc = 1;         /* skip meaningless cross-node RTC sync */
-/* Root filesystem backing.  During install the root is the tape's UFS image
-   (superblock at byte 0x2000); the blank disk.img is the write target.  Reads
-   issued by the buffer cache are satisfied from this file.
-   NULL means "the image we booted" -- main.c fills it in; --tape=PATH sets it
+/* Root filesystem backing (superblock at byte 0x2000).  Reads issued by the
+   buffer cache are satisfied from this file.
+   NULL means "the image we booted" -- main.c fills it in; --root=PATH sets it
    to something else, which is the only way root and boot media differ. */
 const char *root_img_path;
 /* ★ Opened READ-ONLY, and cpu.c gates write-back on the device not being the

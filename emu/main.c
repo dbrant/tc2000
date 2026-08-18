@@ -40,7 +40,7 @@ int main(int argc, char **argv)
         if      (!strncmp(argv[i], "--limit=", 8)) limit = strtoull(argv[i] + 8, 0, 0);
         else if (!strncmp(argv[i], "--sig=", 6))   sig = (u32)(u8)argv[i][6];
         else if (!strncmp(argv[i], "--nodes=", 8)) cfg_nodes = (u32)strtoul(argv[i]+8,0,0);
-        else if (!strncmp(argv[i], "--tape=", 7))  root_img_path = argv[i]+7;
+        else if (!strncmp(argv[i], "--root=", 7))  root_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--kernel=", 9)) kernel_path = argv[i]+9;
         else if (!strncmp(argv[i], "--disk=", 7))  disk_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--hostfile=", 11)) hostfile_path = argv[i]+11;
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
                 "                         [--debug] [--kernel=PATH] [--uprog=PATH]\n"
                 "                         [--handload=HOSTPATH]\n"
                 "                         [--nodes=N]\n"
-                "                         [--tape=PATH] [--disk=PATH]\n"
+                "                         [--root=PATH] [--disk=PATH]\n"
                 "                         [--console-port=N]\n"
                 "  <image>      a 4.3BSD filesystem image to boot -- e.g. the\n"
                 "               install tape.  Its own /vmunix is the kernel and\n"
@@ -196,8 +196,10 @@ int main(int argc, char **argv)
                 "               amber, the kernel's log() lines dim.  Default is\n"
                 "               on for a terminal, off when redirected; NO_COLOR\n"
                 "               in the environment also turns it off\n"
-                "  --tape=PATH  mount a DIFFERENT filesystem as root than the\n"
-                "               one booted from (default: the booted image)\n"
+                "  --root=PATH  mount a DIFFERENT filesystem as root than the\n"
+                "               one booted from (default: the booted image).\n"
+                "               For a disk carrying no usable /vmunix of its\n"
+                "               own: boot a kernel from one image, root on this.\n"
                 "               The boot image is opened READ-ONLY; change one\n"
                 "               by attaching it as --disk from another boot.\n"
                 "  --disk=PATH  SCSI sd0 install-target image (default: disk.img)\n"
@@ -254,14 +256,9 @@ int main(int argc, char **argv)
                 uenvp[nuenvp++] = "SHELL=/bin/sh";
             }
         }
-        /* ★ THE IMAGE CONTAINS THE KERNEL, so it is the only file needed:
+        /* The boot image contains the kernel, so it is the only file needed:
            `sys tapeimage.img' boots the /vmunix inside it and mounts that same
-           filesystem as root.  --kernel=PATH picks a different one out of it.
-
-           A standalone kernel is deliberately not accepted.  It would leave the
-           root filesystem to be GUESSED from the kernel's path -- silently
-           wrong for any layout the guess did not expect, and surfacing
-           thousands of instructions later as `cannot mount root'. */
+           filesystem as root.  --kernel=PATH picks a different one out of it. */
         {
             FILE *ki = fopen(path, "rb");
             const char *kp = kernel_path ? kernel_path : "/vmunix";
@@ -278,14 +275,14 @@ int main(int argc, char **argv)
                 kp, path, kernel_img_len);
             fclose(ki);
         }
-        /* The booted image is its own root filesystem unless --tape says else. */
+        /* The booted image is its own root filesystem unless --root says else. */
         if (!root_img_path) root_img_path = path;
 
         root_img = fopen(root_img_path, "rb");   /* read-only: see globals.c */
         if (root_img)
             dbg("root image: %s (open)\n", root_img_path);
         else
-            /* Only reachable via --tape=, the booted image having opened
+            /* Only reachable via --root=, the booted image having opened
                above.  Name the consequence: the kernel's own complaint comes
                thousands of instructions later and points nowhere near here. */
             fprintf(stderr, "root image: %s could not be opened -- disk reads "

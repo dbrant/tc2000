@@ -172,7 +172,7 @@ the kernel create them.
 
 | flag | |
 |---|---|
-| `--tape=PATH` | mount a different filesystem as root than the one booted from |
+| `--root=PATH` | mount a different filesystem as root than the one booted from |
 | `--kernel=PATH` | boot a different kernel from inside the image (default `/vmunix`) |
 | `--disk=PATH` | SCSI `sd0` install target (default `disk.img`) |
 | `--hostfile=PATH` | expose a host file to the guest at `/hosttar`, read-only — so the guest can `tar xpf /hosttar` an archive that lives on no guest filesystem |

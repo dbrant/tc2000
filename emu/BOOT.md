@@ -43,7 +43,8 @@ alone is a complete machine:
 
 The emulator reads the kernel out of the image through `ffs.c` and mounts that
 same image as root. `--kernel=PATH` selects a different kernel from within it;
-`--tape=PATH` mounts a different filesystem as root than the one booted from.
+`--root=PATH` mounts a different filesystem as root than the one booted from,
+which is how to boot a disk that carries no usable `/vmunix` of its own.
 
 ### A note on MSYS2 and guest paths
 
@@ -59,7 +60,7 @@ signature `'A'`.
 Useful flags: `--scsi` (configure the SCSI disk / enable the sd0 path),
 `--scsitrace`, `--clock`, `--pchist` (dump the last 64K PCs at halt — the tool
 that cracked several blockers), `--watch=PC`, `--nodes=N`, and the two image
-paths `--tape=PATH` (mount a different root than the booted image) and
+paths `--root=PATH` (mount a different root than the booted image) and
 `--disk=PATH` (SCSI sd0 install target; default `disk.img`).
 
 ### What reaches the terminal — `--debug`
