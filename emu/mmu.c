@@ -168,10 +168,9 @@ int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys, u32 *pd_out)
 void cmmu_command(u32 base, u32 cmd)
 {
     /* 0x20/0x24 are the user/supervisor address-probe commands; everything else
-       is a cache/TLB invalidate.  Those used to be ignorable because kernel VAs
-       bypassed the TLB entirely (a hardcoded direct map), but once kernel space
-       is resolved through the kernel's own page tables a stale entry survives a
-       PTE change and the kernel reads memory that has moved.  Flush
+       is a cache/TLB invalidate.  These matter because kernel space resolves
+       through the kernel's own page tables: a stale entry would survive a PTE
+       change and the kernel would read memory that has moved.  Flush
        conservatively -- correctness first; the TLB refills immediately. */
     if (cmd != 0x20 && cmd != 0x24) { tlb_flush(); return; }
     u32 vaddr = mem_r32(base + CMMU_SAR);
@@ -210,18 +209,15 @@ void tlb_flush(void)
    same PA 00221000; and load_context writes phys|0x201 for the writable u-area
    alias and phys|0x205 for the read-only one.
 
-   The emulator used to return the PA without looking at protection at all, so
-   a write to a COW page silently succeeded and parent and child went on
-   sharing one physical page.  That is subtle and awful: /bin/sh forked, the
-   child read its return address off what it thought was its own stack, and got
-   the value the PARENT had since pushed there -- so it returned to the wrong
-   place and ran the parent's code path instead of exec'ing the command.
+   Returning the PA without checking protection would let a write to a COW page
+   silently succeed, leaving parent and child sharing one physical page --
+   subtle and awful: forked /bin/sh reads its return address off what it thinks
+   is its own stack, gets what the PARENT has since pushed there, and runs the
+   parent's code path instead of exec'ing the command.
 
-   Raise a write fault instead and let the kernel's own vm_fault break the COW,
-   which it does completely -- it finds the resident page, allocates a fresh one
-   and calls pmap_copy_page to carry the contents over.  (The emulator used to
-   have to redo that copy itself, because pmap_copy_page's scratch window landed
-   in unbacked space; see scratch_base() below.  It does not any more.)
+   So raise a write fault and let the kernel's own vm_fault break the COW, which
+   it does completely: finds the resident page, allocates a fresh one, and calls
+   pmap_copy_page to carry the contents over.
 
    Returns 1 if a fault was recorded. */
 static int cow_fault(u32 va)

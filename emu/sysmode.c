@@ -101,19 +101,17 @@ int run_sys(const char *path, u64 limit, u32 sig)
     static u32 pchist[PCH_N]; static unsigned pchpos = 0;
     while (cpu.count < limit) {
 #ifdef __EMSCRIPTEN__
-        /* Hand the worker's event loop a turn a few dozen times a second so the
-           boot log STREAMS to the page, instead of landing in one lump when the
-           kernel finally reads the console.  Asyncify unwinds and rewinds the
-           whole C stack here, which at once per 256k instructions is
-           unmeasurable -- and it is also what lets a stop request from the page
-           ever be seen. */
+        /* Give the worker's event loop a turn so the boot log STREAMS to the
+           page rather than landing in one lump at the first console read.  The
+           asyncify unwind/rewind is unmeasurable at once per 256k instructions,
+           and is also what lets a stop request be seen. */
         if ((cpu.count & 0x3FFFFull) == 0) emscripten_sleep(0);
 #endif
         pchist[pchpos++ & (PCH_N - 1)] = cpu.pc;
         /* --profile: where does the time actually GO?  --pchist keeps the last
            64k PCs and --wtrace a straight line from a trigger; neither answers
-           "which loop is eating the run", which is exactly the question when
-           hunting busy-waits that the counter rate used to hide. */
+           "which loop is eating the run", the question when hunting a
+           busy-wait. */
         if (profile) prof_bucket(cpu.pc);
         /* derail catcher: kernel boot stays in kernel space (>=0xC0000000);
            a fetch below it means a bad jump -- report the last kernel pc.
@@ -152,14 +150,9 @@ int run_sys(const char *path, u64 limit, u32 sig)
         /* The process has exited and the kernel switched back to
            proc0, which we parked on a br-to-self.  Report and stop. */
         if (procexp && cpu.pc == PROCEXP_IDLE) {
-            /* CPU 0 has nothing to run.  Ask the KERNEL's own scheduler for
-               the next process -- there is no hand-dispatch here any more.
-               proc0 is parked on a br-to-self so it never yields and the
-               scheduler never gets a turn; that is the only reason the emulator
-               ever had to pick a process itself (it used to scan the proc table
-               for a runnable descendant and load_context it by hand, standing
-               in for the 63 CPUs this model does not run).  Per-process u-areas
-               made the kernel's scheduler work properly and retired it. */
+            /* CPU 0 has nothing to run: ask the KERNEL's own scheduler for the
+               next process.  proc0 is parked on a br-to-self, so it never
+               yields and the scheduler only gets a turn from here. */
             /* Anything of ours still in play -- running, runnable or asleep --
                but not a zombie (nobody reaps ours; proc0 is their parent). */
             u32 pb = mem_r32(translate(0xC1015758u, 0));
@@ -215,29 +208,22 @@ int run_sys(const char *path, u64 limit, u32 sig)
                 }
                 dbg("[procexp] scheduler made no progress -- deadlock?\n");
             }
-            /* ★ WARN ABOUT UNFLUSHED DISK WRITES.  This harness ends the
-               moment our process tree exits -- there is no shutdown, so the
-               kernel's buffer cache can still hold dirty FFS metadata
-               (cylinder-group block and inode bitmaps, the superblock summary,
-               inodes).  Those never reach disk.img, and the NEXT run mounts a
-               filesystem whose bitmaps say "free" for blocks and inodes the
-               directory tree is really using.  The next allocation collides:
-               `ialloc: dup alloc' or `free: freeing free block' -- a panic in a
-               later run caused by writes silently lost in an earlier one.
+            /* ★ WARN ABOUT UNFLUSHED DISK WRITES.  This harness ends the moment
+               our process tree exits -- no shutdown, so the buffer cache can
+               still hold dirty FFS metadata (CG block and inode bitmaps, the
+               superblock summary, inodes).  That never reaches the image, and
+               the NEXT run mounts a filesystem whose bitmaps say "free" for
+               blocks the directory tree is using: `ialloc: dup alloc' or
+               `free: freeing free block', a panic caused by an earlier run.
 
-               We cannot flush it ourselves: sync() has to sleep waiting for its
-               I/O, and calling it from here (proc0 parked on the idle sentinel,
-               which never yields to the scheduler) just runs away -- measured,
-               30M instructions and no return.  It has to run as a real process,
-               so the guest has to ask for it.  Say so loudly instead.
+               We cannot flush it ourselves: sync() sleeps waiting for its I/O,
+               and from here (proc0 parked on the idle sentinel, never yielding
+               to the scheduler) it runs away -- 30M instructions, no return.
+               It has to run as a real process, so the guest must ask for it.
 
-               ★ On stderr, NOT through dbg().  This is the one message that
-               predicts a specific failure in a FUTURE run, and it was briefly
-               swept behind --debug along with the emulator's ordinary
-               commentary -- which is precisely backwards: an unwarned user
-               meets it later as `ialloc: dup alloc' with nothing connecting the
-               panic to the run that caused it.  It stays with the other genuine
-               failures, unconditional. */
+               On stderr, NOT dbg(): this predicts a specific failure in a
+               FUTURE run, so hiding it behind --debug would leave the later
+               panic with nothing connecting it to the run that caused it. */
             if (disk_wrote && !fs_synced)
                 fprintf(stderr,
                        "[disk] ★ WARNING: %s was written through the "
@@ -355,13 +341,10 @@ int run_sys(const char *path, u64 limit, u32 sig)
                Hand it to the kernel's own MC88100 handler as a genuine access
                fault -- vector 2 for an instruction fetch, 3 for data -- and let
                its vm_fault resolve it.  This is the only route that can do
-               copy-on-write or vnode paging.
-
-               There used to be a fallback here (--no-hwfault) that resolved
-               the fault itself with vm_map_pageable over the faulting 8K.  It
-               could never break copy-on-write -- vm_map_pageable(wire) reports
-               success on a COW entry without materialising the page -- so it
-               could not run a forked shell, and it is gone. */
+               copy-on-write or vnode paging: resolving the fault here with
+               vm_map_pageable cannot break COW -- wiring reports success on a
+               COW entry without materialising the page -- so a forked shell
+               would not run. */
             ufault_pending = 0;
             if (!interactive && ufaults++ < (verbose_sys ? 100000u : 12u))
                 dbg("[hwfault] pid %d %08x (%s%s) pc=%08x %s @%llu\n",

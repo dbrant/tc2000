@@ -204,7 +204,7 @@ void dev_write32(u32 a, u32 v)
    "Sun" label styles) reads a geometry it accepts instead of "Label style not
    understood yet".  Written when block 0 carries no valid Sun disklabel, and
    re-written when the one there describes a different-sized disk than the image
-   actually is -- see the note in the body.  The
+   is -- see the body.
    Sun dk_label (512 bytes, big-endian): magic 0xDABE at 0x1FC, cksum at 0x1FE
    (all 256 shorts must XOR to 0), and the fields newfs actually reads --
    ncyl@0x1B0, nhead@0x1B4, nsect@0x1B6 -- plus the partition map dkl_map[8] at
@@ -213,19 +213,17 @@ void sd_ensure_label(void)
 {
     if (!disk_img) return;
 
-    /* ★ The GEOMETRY FOLLOWS THE FILE, every time the image is attached.
-       heads and sectors/track are a conventional shape -- nothing here or in
-       the guest does anything with them but multiply them out -- so the image's
-       size lands entirely in the cylinder count.
+    /* ★ The GEOMETRY FOLLOWS THE FILE, on every attach.  Heads and
+       sectors/track are a conventional shape -- nothing here or in the guest
+       does more than multiply them out -- so the size lands entirely in the
+       cylinder count.
 
-       Recomputing it on every attach, rather than only when no label is
-       present, is what makes `--disk=' work on an image of any size.  A label
-       written once and then trusted forever describes whatever the file used to
-       be: grow a 64 MB image to 128 MB and the old 130-cylinder label makes
-       half of it unreachable, silently, because nothing re-examines it.  The
-       label is ours in the first place -- the tape ships no `disklabel', so the
-       guest never writes one -- which is what makes rewriting it safe.  It is
-       block 0; the FFS superblock is at byte 8192 and is untouched. */
+       Recomputing every time, not just when no label is present, is what makes
+       `--disk=' work on an image of any size: a label trusted forever describes
+       whatever the file once was, so growing a 64 MB image to 128 MB would
+       leave half of it silently unreachable.  Rewriting is safe because the
+       label is ours -- the tape ships no `disklabel', so the guest never writes
+       one -- and block 0 is below the FFS superblock at byte 8192. */
     fseek(disk_img, 0, SEEK_END);
     long sz = ftell(disk_img);
     /* ftell is `long', so this whole path -- like every fseek in the sd0 model

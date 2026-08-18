@@ -9,23 +9,22 @@
 # no tape and no separate kernel, because the image carries /vmunix like the tape
 # does and the emulator reads it out of the filesystem it is about to mount.
 #
-# Three things about this are worth knowing before changing it:
+# Three things to know before changing it:
 #
-#  * /dev CANNOT be copied.  `cp -r /dev' would READ every node -- pulling the
-#    whole raw disk through /dev/rsd0b -- and the 1989 tar does not carry device
-#    files either.  The nodes are RECREATED with mknod, from the major/minor
-#    numbers `ls -l /dev' prints.  nX's mknod takes an optional iobus argument
-#    and `ls' shows it as -1/-3, but it rejects those as arguments; omitted, it
-#    defaults to -1, which /dev/null and the rest work fine with.
+#  * /dev CANNOT be copied.  `cp -r /dev' READS every node -- pulling the whole
+#    raw disk through /dev/rsd0b -- and the 1989 tar carries no device files.
+#    The nodes are RECREATED with mknod from the major/minor numbers `ls -l
+#    /dev' prints.  nX's mknod takes an optional iobus argument, which `ls'
+#    shows as -1/-3 but mknod rejects; omitted it defaults to -1, which works.
 #
-#  * The session MUST end with umount.  The emulator services block I/O
-#    synchronously at the point the kernel waits for it, so writes nothing waits
-#    on are simply lost when the machine stops.  umount waits.  Skip it and the
-#    image gets a filesystem whose bitmaps disagree with its directory tree,
-#    which surfaces in a LATER run as `panic: ialloc: dup alloc'.
+#  * The session MUST end with umount.  Block I/O is serviced synchronously at
+#    the point the kernel waits for it, so writes nothing waits on are lost when
+#    the machine stops; umount waits.  Skipping it leaves a filesystem whose
+#    bitmaps disagree with its directory tree, surfacing in a LATER run as
+#    `panic: ialloc: dup alloc'.
 #
-#  * A newly booted root is READ-ONLY in effect, for the same reason.  To change
-#    a disk, attach it as --disk from a tape boot and umount -- which is exactly
+#  * A booted root is READ-ONLY in effect, for the same reason.  Changing a disk
+#    means attaching it as --disk from a tape boot and umounting -- which is
 #    what this script does.
 set -e
 cd "$(dirname "$0")/.."

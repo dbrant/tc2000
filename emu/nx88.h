@@ -1,7 +1,7 @@
 /*
  * nx88.h -- shared declarations for the nX / MC88100 emulator.
  *
- * The emulator was one 3000-line file; it is now split by theme:
+ * Split by theme:
  *
  *   globals.c   all machine state and configuration flags (see externs below)
  *   memory.c    paged physical RAM, CMRAM backing store, byte helpers
@@ -244,21 +244,16 @@ extern const char *kernel_path;
 int ffs_read_file(FILE *img, const char *path, u8 **buf, u32 *len);
 
 /* ★ EMULATOR COMMENTARY vs THE MACHINE'S OWN VOICE.
-   Two quite different things used to share stdout.  What the GUEST says -- the
-   kernel's console log via kmsg_line's "[nx] ..." and the process's own writes
-   through con_write -- is the output someone running the machine actually came
-   for.  What the EMULATOR says about it -- the load map, the synthetic boot
-   tables, the proc experiment's register dumps, [kfall], [halt], [PANIC], the
-   closing instruction count -- is debugging, and there is a lot of it: it
-   buried the kernel's log completely, and in a browser it is most of what
-   scrolls past.
+   What the GUEST says -- the kernel's log via kmsg_line's "[nx] ..." and the
+   process's own writes through con_write -- is what someone running the machine
+   came for.  What the EMULATOR says about it -- load map, synthetic boot
+   tables, proc-experiment register dumps, [kfall], [halt], [PANIC], the closing
+   instruction count -- is debugging, and there is enough of it to bury the log
+   completely.
 
-   So all of it goes through dbg() and needs --debug.  Every diagnostic FLAG
-   (--trace-traps, --wmem, --profile, -v, ...) turns --debug on for itself, so
-   no existing command line prints less than it used to; what changes is the
-   plain `nx88 sys vmunix' and `--shell' cases, which now say nothing the
-   machine did not say itself.  Genuine failures are not commentary and stay on
-   stderr, unconditionally. */
+   So all of it goes through dbg() and needs --debug.  Every diagnostic flag
+   (--trace-traps, --wmem, --profile, -v, ...) turns --debug on for itself.
+   Genuine failures are not commentary and stay on stderr, unconditionally. */
 #define dbg(...) do { if (debug) printf(__VA_ARGS__); } while (0)
 extern u32 brk_watch_pc, brk_watch_arg;
 extern u32 last_sleep_chan, last_sleep_from;

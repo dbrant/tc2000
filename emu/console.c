@@ -12,8 +12,8 @@
  * the kernel boot log keeps flowing to stdout, and a VT100/telnet client that
  * connects to the port gets the interactive session on its own wire.
  *
- * The socket is a serial-console stand-in, so it does the terminal cooking the
- * host tty used to do for us: LF->CRLF on output, CR/CRLF/CR-NUL->LF on input,
+ * The socket is a serial-console stand-in, so it does the cooking a host tty
+ * would: LF->CRLF on output, CR/CRLF/CR-NUL->LF on input,
  * server-side echo with backspace editing, and ^D as end-of-file.  Minimal
  * telnet IAC negotiation puts a standard telnet client into character mode;
  * raw-TCP clients (nc, PuTTY "Raw") ignore it and work the same.
@@ -52,26 +52,21 @@ static int       con_pushback = -1;         /* one-byte input pushback          
 /* ---------------------------------------------------------------------------
    ★ IN A BROWSER THE CONSOLE IS THE SOCKET ONE, not the stdio one.
 
-   The terminal emulator on the page (xterm.js, over a postMessage pipe) is the
-   twin of the telnet client --console-port serves: keystrokes arrive raw and
-   unechoed, and nothing on that wire cooks them.  Every part of the line
-   discipline a host tty used to hand the stdio console -- echo, backspace,
-   CR / CRLF -> LF, ONLCR on the way out -- has to happen in here.  So the web
-   build does not grow a third transport: it IS the socket transport, with
-   con_use_sock left on and only the two bottom-most primitives swapped.  Bytes
-   out go to the page; bytes in come from a ring the page fills.  con_cook_line,
-   the sgtty raw/cbreak switch and FIONREAD are then shared, unmodified, which
-   is what makes the games and Emacs behave the same in a tab as over telnet.
+   xterm.js over a postMessage pipe is the twin of the telnet client
+   --console-port serves: keystrokes arrive raw and unechoed, so the whole line
+   discipline -- echo, backspace, CR/CRLF -> LF, ONLCR outbound -- has to happen
+   here.  Hence no third transport: this IS the socket transport with
+   con_use_sock left on and only con_send_raw/con_recv_raw swapped.
+   con_cook_line, the sgtty raw/cbreak switch and FIONREAD are shared unmodified,
+   which is what makes the games and Emacs behave the same in a tab as telnet.
 
-   Blocking is the other half of the problem.  A guest read() with nothing typed
-   yet has to WAIT, and a browser tab cannot spin waiting -- the event loop it is
-   blocking is the same one that would deliver the keystroke.  -sASYNCIFY is the
-   way out: emscripten_sleep() unwinds the entire C stack back to the worker's
-   event loop and rewinds it when a key lands.  That is why there is no thread
-   and no SharedArrayBuffer here, and therefore no COOP/COEP response headers to
-   arrange -- the page is deployable as plain static files.  It costs little
-   because the syscall dispatch sits in run_sys and NOT inside step(): the call
-   graph emcc has to instrument stops short of the interpreter's hot loop.  */
+   Blocking is the other half.  A guest read() with nothing typed must WAIT, and
+   a tab cannot spin -- the event loop it blocks is the one that would deliver
+   the keystroke.  -sASYNCIFY unwinds the C stack back to the worker's event
+   loop and rewinds it when a key lands: no thread, no SharedArrayBuffer, and so
+   no COOP/COEP headers to arrange.  Cheap because the syscall dispatch sits in
+   run_sys and NOT in step(), so the instrumented call graph stops short of the
+   interpreter's hot loop. */
 #include <emscripten.h>
 
 /* The page supplies nxWebOut; see web/nx88-worker.js. */
@@ -237,24 +232,19 @@ static int con_in_byte(void)
 #endif  /* __EMSCRIPTEN__ */
 }
 
-/* ★ Is a CR's paired LF/NUL right behind it, or must we wait to find out?
+/* ★ May we block waiting for a CR's paired LF/NUL?
 
-   On a telnet wire it always is: RFC 854 encodes a line ending as CR LF or
-   CR NUL, so the byte after a CR is already on its way and reading it
-   unconditionally is safe.  It is also NECESSARY there -- TCP can deliver the
-   CR by itself, and a peek that gave up on finding nothing would leave the LF
-   to be read as a fresh, empty line, which con_sock_read reports as EOF and
-   which would kill the shell.
+   On a telnet wire, yes: RFC 854 encodes a line ending as CR LF or CR NUL, so
+   the second byte is already coming.  Reading it unconditionally is also
+   NECESSARY there -- TCP can deliver the CR alone, and an LF left unconsumed
+   reads as a fresh empty line, which con_sock_read reports as EOF and which
+   kills the shell.
 
-   The page's wire carries no such encoding.  xterm sends ONE byte per
-   keystroke, so RETURN is a lone CR with nothing behind it -- and reading
-   unconditionally BLOCKED: the line sat undelivered until the next key was
-   pressed, whereupon that key satisfied the read, got pushed back, and the
-   line finally went through.  Pressing Enter appeared to do nothing, and the
-   next character appeared to deliver both.  So on that wire, look only when a
-   byte is already in hand.  An embedder that sends a genuine "...\r\n" through
-   send() still works, because both bytes reach the ring together and the peek
-   finds the LF. */
+   The page's wire has no such encoding: xterm sends one byte per keystroke, so
+   RETURN is a lone CR and blocking on a byte behind it hangs the line until the
+   next key is pressed.  There, peek only when a byte is already in hand -- an
+   embedder's send("...\r\n") still works, both bytes reaching the ring
+   together. */
 #ifdef __EMSCRIPTEN__
 static int con_input_ready(void);
 #define CON_CR_PAIR_WAITING() con_input_ready()
@@ -343,10 +333,9 @@ void con_write_str(const char *s) { con_write((const u8 *)s, strlen(s), 0); }
 /* ---------------------------------------------------------------------------
    ★ TTY MODES -- what makes the curses games playable.
 
-   The console used to answer every tty ioctl with a bare "success" and read
-   input a COOKED LINE at a time.  That is enough for a shell, and it is why
-   /usr/games/snake printed "Terminal must have addressible cursor" and then,
-   once TERM was right, sat waiting for a newline that a game never sends.
+   Answering every tty ioctl with a bare "success" and reading a COOKED LINE at
+   a time is enough for a shell, but a game never sends the newline that would
+   end the line, so it hangs.
 
    4.3BSD terminal control is sgtty, not termios.  The games do exactly this:
      TIOCGETP (0x40067408) save the current sgttyb
@@ -749,22 +738,15 @@ int console_syscall(u32 sysno, u32 tpc)
         if (!fd_is_console(a0)) return 0;
         u32 n = a2 > 4096 ? 4096 : a2;
         u8 tmp[4096];
-        /* ★ Pre-fault the destination BEFORE consuming any input.  This was the
-           one emulator-serviced buffer in this file that did not, and it lost
-           data as well as short-reading: `uwrite_mem` stops at the first
-           non-resident byte, so a read into a page the process has never
-           touched transferred NOTHING and returned 0 -- which stdio latches as
-           EOF -- while the line it had already taken off the host was gone.
-           /usr/games/arithmetic died on exactly that: it sbrk's an 8K stdio
-           buffer at 0xc000, asks its first question, does
-           read(0, 0xc000, 8192) into that untouched page, gets 0 back, sets
-           _IOEOF and then spins forever in _filbuf (0x5bc-0x628 -> 0xb48)
-           without ever issuing another syscall.  The answer you typed was
-           swallowed and nothing happened.
-           The order matters: fault first, and if a page is missing return 1 so
-           the whole syscall re-runs once the kernel has paged it in -- with the
-           input still unread.  Faulting the caller's whole buffer is also what
-           the real 4.3BSD read() does (useracc over the full length). */
+        /* ★ Pre-fault the destination BEFORE consuming any input.  uwrite_mem
+           stops at the first non-resident byte, so a read into a page the
+           process has never touched transfers NOTHING and returns 0 -- which
+           stdio latches as EOF -- while the line already taken off the host is
+           gone.  (/usr/games/arithmetic sbrk's an 8K stdio buffer, reads into
+           that untouched page, gets 0, sets _IOEOF and spins in _filbuf.)
+           Order matters: fault first, and on a missing page return 1 so the
+           syscall re-runs once the kernel has paged it in, input still unread.
+           Faulting the whole buffer is what 4.3BSD read() does, via useracc. */
         if (n && ubuf_fault(a1, n, 1, tpc)) return 1;
         u32 got = !n ? 0
                 : tty_is_raw() ? con_read_raw(tmp, n)   /* a game: one key    */
@@ -774,14 +756,12 @@ int console_syscall(u32 sysno, u32 tpc)
         ret = (long)got;
         break;
     }
-    /* ★ 4.3BSD sgtty ioctls.  The encoding is _IO?('t', cmd, size), so the low
-       byte is the command number -- worth decoding rather than guessing, because
-       two of these were previously mislabelled AND conflated: 0x40067474 is
-       TIOCGLTC (ltchars, cmd 116), not TIOCGETC (cmd 18, 0x40067412).  The real
-       TIOCGETC/TIOCSETC fell through to the default arm, which reports success
-       WITHOUT filling the caller's buffer -- so a program that saves the tty
-       state on entry and restores it on exit was saving stack garbage.  Games
-       only ever touched the ltchars pair, which is why it never showed. */
+    /* ★ 4.3BSD sgtty ioctls.  The encoding is _IO?('t', cmd, size), so decode
+       the low byte rather than guessing: 0x40067474 is TIOCGLTC (ltchars, cmd
+       116), NOT TIOCGETC (cmd 18, 0x40067412) -- they are easily conflated.
+       Any that fall through to the default arm report success WITHOUT filling
+       the caller's buffer, so a program saving tty state on entry saves stack
+       garbage and restores it on exit. */
     case 54:                                         /* ioctl(fd, ...)    */
         if (!fd_is_console(a0)) return 0;
         switch (a1) {
@@ -863,18 +843,15 @@ int console_syscall(u32 sysno, u32 tpc)
 /* ---------------------------------------------------------------------------
    ★ PER-PROCESS descriptor flags.
 
-   fd_console/fd_disk/fd_kernel say which fd NUMBERS the emulator
-   answers for rather than the kernel.  They were one global set, which was
-   fine while only one process existed.  With real fork/exec they have to be
-   per-process: /bin/echo closes 0, 1 and 2 in its exit path, and that wiped
-   the parent shell's console -- so the shell's next read was no longer
-   intercepted, returned EOF, and it quit after a single command.
+   fd_console/fd_disk/fd_kernel say which fd NUMBERS the emulator answers for
+   rather than the kernel.  They must be per-process: /bin/echo closes 0, 1 and
+   2 on exit, and one global set would wipe the parent shell's console -- its
+   next read then goes unintercepted, returns EOF, and it quits after a single
+   command.
 
-   The globals stay as the working copy (every existing user reads them
-   directly and stays unchanged); this just saves and restores them around a
-   change of current process, seeding a process first seen from its PARENT's
-   set, which is exactly fork's inheritance.  Only where there
-   are real processes to tell apart.
+   The globals stay as the working copy every user reads directly; this saves
+   and restores them around a change of current process, seeding a process
+   first seen from its PARENT's set, which is exactly fork's inheritance.
    --------------------------------------------------------------------------- */
 #define FDSETS 24
 typedef struct {

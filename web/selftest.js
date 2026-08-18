@@ -34,21 +34,18 @@ function sink(bytes) {
 }
 globalThis.nxWebOut = sink;
 
-/* What to type, and how long to let it run afterwards.  Each line is fed only
-   once the guest has actually asked for input -- see the pump below. */
-/* ★ Lines end in CR, not LF, because that is what the browser sends: xterm
-   emits one byte per keystroke and RETURN is a bare \r.  Feeding \n here
-   instead would test a path no real user can reach -- and did: an early version
-   of this file used \n, which skips the CR-pairing peek in con_cook_line
-   entirely and so sailed past a bug where pressing Enter delivered nothing
-   until the NEXT key was pressed.  Each line is also pushed as one batch, so
-   the CR is the last byte in the ring, which is exactly the case that used to
-   block.
+/* What to type; each line is fed only once the guest asks for input, see the
+   pump below.
 
-   The last entry is Ctrl-D, not `exit'.  Verified against the native binary:
-   this 1989 /bin/sh runs `exit' and carries straight on -- input that follows
-   it still executes -- so end-of-file is the only thing that actually stops
-   the machine.  The page says the same. */
+   ★ Lines end in CR, not LF, because that is what the browser sends: xterm
+   emits one byte per keystroke and RETURN is a bare \r.  LF would skip the
+   CR-pairing peek in con_cook_line entirely and test a path no user can reach.
+   Each line is pushed as one batch too, so the CR is the last byte in the
+   ring -- the case where that peek must not block.
+
+   The last entry is Ctrl-D, not `exit': this 1989 /bin/sh runs `exit' and
+   carries on, input after it still executing, so end-of-file is the only thing
+   that stops the machine. */
 const SCRIPT = [
   'echo hello from 1989\r',
   'ls /bin\r',

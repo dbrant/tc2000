@@ -9,10 +9,7 @@
 # the telnet console needs winsock.  Neither applies on macOS/Linux.
 #
 set -e
-# The source list below is bare filenames, so the build has to run from here.
-# Anchoring to the script's own directory -- which web/build.sh and serve.py
-# already do -- is what lets it be invoked by path from anywhere.
-cd "$(dirname "$0")"
+cd "$(dirname "$0")"     # the source list is bare filenames; build from here
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)

@@ -406,9 +406,7 @@ static void uput32(u32 pmap, u32 va, u32 v)
 }
 
 /* Create a real process with the kernel's own newproc(), at the swapper idle
-   point, and hand it a program to run.  This is the ONLY way userland starts
-   now: the emulator-serviced process model that used to sit beside it (its own
-   process table, address space and fork/exec/wait/exit) is gone. */
+   point, and hand it a program to run.  The only way userland starts. */
 int proc_experiment(void)
 {
     u32 base = kr32(G_PROCBASE), cur = kr32(G_CURPROC);
@@ -528,8 +526,8 @@ int proc_experiment(void)
     /* The program to run.  --uprog/--shell name a GUEST path, which the
        kernel's own execve resolves in its own namespace; --handload names a
        HOST path, loaded here instead.  One variable, read according to which
-       route is taken: there is no longer a host-side mirror of the guest
-       filesystem, so there is nothing to translate between them. */
+       route is taken; there is no host-side mirror of the guest filesystem to
+       translate between them. */
     static char gpath[1024];
     const char *path = uprog_path ? uprog_path : "/bin/sh";
     snprintf(gpath, sizeof gpath, "%s", path);
@@ -700,8 +698,8 @@ int proc_experiment(void)
 
     /* We are about to abandon proc0 mid-flight.  When the process exits, the
        kernel switches back to proc0 (its per-CPU idle thread) and load_contexts
-       a context nobody ever saved -- which is why execution used to wander off
-       into unmapped user VAs.  Snapshot proc0 properly with the kernel's own
+       a context nobody ever saved, and execution wanders off into unmapped
+       user VAs.  Snapshot proc0 properly with the kernel's own
        save_context (c00173ec: stores r1 as the resume PC, r14..r31, the PSR at
        +0x8c and the CPU number at +0xb4), then point its resume PC at the
        sentinel spin so the emulator can see the process finish. */
@@ -1463,24 +1461,20 @@ int step(void)
         }
     } else if (op == 0x21) {                                          /* FPU */
         u32 fop = (w >> 11) & 0x1F;
-        /* ★ Operand-size fields: **T1 at 10-9, T2 at 8-7, TD at 6-5.**
-           TD being the LOW pair is the counter-intuitive part, and getting it
-           wrong is what used to make `flt` write r24 as a single while
-           `fsub.ddd` two instructions later read the same register as a double.
+        /* ★ Operand-size fields: **T1 at 10-9, T2 at 8-7, TD at 6-5** -- the
+           documented MC88100 SFU1 layout.  Two traps, both silent:
 
-           ★★ T1 and T2 were then ALSO swapped, and that was wrong -- fixed
-           after /usr/games/trek died on "TREK SYSERR: Device probabilities sum
-           to 36".  The one-operand conversions (int/nint/trnc/fsqrt) take their
-           operand from **S2**, so the field that sizes it is T2; with T2 read
-           from 10-9, trek's `trnc` (60 of them, every one encoded
-           b10-9=s b8-7=d b6-5=s) truncated the high word of each double as if
-           it were a single.  Measured live: the doubles are 70, 110, 110, 125,
-           125, 75, 150, 20, 35, 30, 20, 50, 80, 0, 0, 0 -- exactly the 1000
-           trek checks for -- and reading their high words as singles gives
-           3+3+3+3+3+3+3+2+3+2+2+3+3 = **36**, the reported number.
-           The swap was invisible in snake because its operands were the same
-           precision either way; only a one-operand instruction can see it.
-           This is the documented MC88100 SFU1 layout. */
+           TD being the LOW pair is counter-intuitive.  Read it elsewhere and
+           `flt' writes r24 as a single while `fsub.ddd' reads it as a double.
+
+           T1/T2 must not be swapped.  The one-operand conversions
+           (int/nint/trnc/fsqrt) take their operand from S2, so T2 is what sizes
+           it; swapping them truncates the high word of each double as a single.
+           Only a one-operand instruction can see the difference -- evidence is
+           /usr/games/trek, whose 60 `trnc' (b10-9=s b8-7=d b6-5=s) over the
+           doubles 70,110,110,125,125,75,150,20,35,30,20,50,80,0,0,0 must sum to
+           1000; read as singles they give 36, its "Device probabilities sum to
+           36" error. */
         int td = (w >> 5) & 3, t2 = (w >> 7) & 3, t1 = (w >> 9) & 3;
         u32 S2 = w & 31;
         switch (fop) {
@@ -1497,17 +1491,13 @@ int step(void)
         case 0x0B:                                               /* trnc (toward 0) */
             WR(D, (u32)(s32)trunc(fp_read(S2,t2))); break;
         case 0x07: {                                             /* fcmp */
-            /* ★ The condition bits sit at the SAME positions as the integer
-               cmp (C_EQ=2 .. C_GE=7); only bits 0 and 1 differ -- nc (the
-               operands are not comparable, i.e. a NaN) and cp (they are).
-               This used to write eq/ne/gt/le/lt/ge one bit LOW, so every
-               floating-point branch tested its neighbour: code doing `bb1 4`
-               for GT read our LE instead.  /usr/games/snake picks the chaser's
-               direction with `fcmp.dds; bb1 4` over a weight table, so with
-               weight 0 the test was always true, it always chose direction 0,
-               marched the snake in a straight line off the board and then did
-               rand() %% 0 -- surfacing as "Illegal instruction - core dumped"
-               several seconds later. */
+            /* ★ The condition bits sit at the SAME positions as the integer cmp
+               (C_EQ=2 .. C_GE=7); only bits 0 and 1 differ -- nc (not
+               comparable, i.e. a NaN) and cp (comparable).  Write them one bit
+               low and every FP branch tests its neighbour: `bb1 4' for GT reads
+               LE.  Fails far from the cause -- /usr/games/snake steers with
+               `fcmp.dds; bb1 4' over a weight table, so it marches off the
+               board and dies seconds later in rand() %% 0. */
             double x = fp_read(S1,t1), y = fp_read(S2,t2);
             u32 r = 0;
             if (!(x < y || x > y || x == y)) {

@@ -1,20 +1,14 @@
 /* Read-only 4.3BSD FFS reader, over any image the host can open.
  *
- * It was written to serve --diskmount in the synthetic process model, and when
- * that model went away it spent a while unlinked, kept only because it was the
- * one way to browse disk.img from the host.  It is back in the build for a
- * better reason: the boot image is a filesystem that CONTAINS THE KERNEL, and
- * this is what reads it out -- so the emulator takes one file and nothing else,
- * and loading a standalone vmunix from the host is gone entirely.  Verified on
- * both images; the /vmunix read out of tapeimage.img is byte-for-byte the file
- * that used to sit beside it.
+ * The boot image is a filesystem that CONTAINS THE KERNEL, and this is what
+ * reads it out (see main.c), so the emulator needs one file and nothing else.
+ * It is also the only way to browse an image from the host.
  *
  * ffs_read_file() takes only REGULAR files; directories return -1 by design.
  *
  * Superblock -> name lookup -> inode -> data blocks.  Big-endian; the on-disk
- * field offsets were pinned against a disk.img the guest itself newfs'd and
- * populated (verified by reading a known binary back byte-for-byte), and they
- * read BBN's own 1989 tape image unchanged -- same newfs, same layout.
+ * field offsets are pinned against a disk.img the guest itself newfs'd, and
+ * read BBN's 1989 tape image unchanged -- same newfs, same layout.
  * Read-only: no allocation, no bitmap or cylinder-group summary maintenance. */
 #include "nx88.h"
 

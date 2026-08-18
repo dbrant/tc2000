@@ -52,9 +52,7 @@ int main(int argc, char **argv)
             { tick_div = (u32)strtoul(argv[i]+10,0,0); tickdiv_set = 1; }
         /* --- user-mode program launch --- */
         /* --shell: boot, then hand the terminal to the guest's own /bin/sh,
-           run as a REAL nX process.  It used to mean the synthetic process
-           model; that model is gone, so this is now just a set of defaults
-           over the real process path. */
+           run as a real nX process.  Just defaults over the --uprog path. */
         else if (!strcmp(argv[i], "--shell")) {
             interactive = 1; deliver_traps = 1;
             trace_traps = 0; quiet_uproc = 1;
@@ -64,15 +62,10 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--uarg=", 7) && nuargv < MAX_UARGV) uargv[nuargv++] = argv[i] + 7;
         else if (!strncmp(argv[i], "--uenv=", 7) && nuenvp < MAX_UENVP) uenvp[nuenvp++] = argv[i] + 7;
         /* --- output / diagnostics ---
-           ★ EVERY flag in this section that produces output also sets `debug`.
-           The emulator's own commentary is off by default now (see dbg() in
-           nx88.h), and a diagnostic flag whose output the same run then
-           swallowed would be a trap.  So asking for any of it asks for all of
-           it, which is also what these flags did before the gate existed --
-           no command line documented in BOOT.md prints less than it used to.
-           --quiet and --kmsg are the two that deliberately do NOT: --quiet
-           means be quiet, and --kmsg asks for the KERNEL's voice, which is
-           exactly the thing that is no longer buried. */
+           ★ Every flag here that produces output also sets `debug` (see dbg()
+           in nx88.h): a diagnostic flag whose output the same run then
+           swallowed would be a trap.  --quiet and --kmsg deliberately do not --
+           --quiet means be quiet, and --kmsg asks for the KERNEL's voice. */
         else if (!strcmp(argv[i], "--quiet"))      { trace_traps = 0; quiet_uproc = 1; debug = 0; }
         else if (!strcmp(argv[i], "--debug"))      debug = 1;
         else if (!strcmp(argv[i], "--kmsg"))       kmsgs = 1;
@@ -84,15 +77,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--vmprobe"))    { vmprobe = 1; debug = 1; }
         else if (!strcmp(argv[i], "--vmexp"))      { vmexp = 1; debug = 1; }
         else if (!strcmp(argv[i], "--ctxtrace"))   { ctxtrace = 1; debug = 1; }
-        /* --handload=PATH: run a HOST a.out that is not in the guest filesystem
-           at all -- the emulator loads the image into a real kernel process
-           instead of letting the kernel's execve do it.  That is the ONLY thing
-           this mode still offers; everything else is better served by --uprog.
-           It is also now the only way to reach the hand-load path at all: the
-           bare `--procexp' spelling used to get there without naming a program,
-           and fell back to loading <tape-dir>/bin/echo from the HOST -- which
-           needed a host-side copy of the guest filesystem, and there is no
-           longer any such thing. */
+        /* --handload=PATH: run a HOST a.out that is on no guest filesystem --
+           the emulator loads the image into a real kernel process rather than
+           letting execve do it.  The only way to reach that path, and the only
+           thing it offers; --uprog serves everything else better. */
         else if (!strncmp(argv[i], "--handload=", 11))
             { procexp = 1; uprog_path = argv[i] + 11;
               deliver_traps = 1; trace_traps = 1; debug = 1; }
@@ -128,33 +116,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "user")) mode_sys = 0;
         else if (nwords < 63) words[nwords++] = argv[i];
     }
-    /* Running a user program means running it as a REAL nX process.  There used
-       to be a second, SYNTHETIC model here -- the emulator serviced fork/exec/
-       wait/exit itself against its own process table and address space -- and
-       --uprog/--shell selected it.  It is gone: the kernel's own path does
-       everything it did, including the installer.  --procexp still opts into
-       the older hand-load path (the emulator loads the a.out instead of letting
-       execve do it), so do not override that one. */
+    /* A user program runs as a REAL nX process.  --handload sets procexp on its
+       own to select the hand-load path instead, so do not override that one. */
     if ((uprog_path || interactive) && !procexp) { procexp = 1; procexec = 1; }
 
-    /* ★ Running a real kernel process (procexp) ALWAYS means real MC88100
-       access-fault delivery and per-process u-areas.  Those were once
-       independently switchable -- --hwfault/--peru with --no-hwfault/--no-peru
-       to opt back out -- so the code carried `hwfault` and `peru` booleans of
-       its own.  They ended up identically equal to procexp and are gone; the
-       branches that used to test them test procexp directly.
-
-       The question they existed to answer is settled and worth not re-opening:
-       neither is optional.  Without per-process u-areas, curproc still names
-       the parent after a fork and the first sleep panics; without real fault
-       delivery the resolver has to call vm_map_pageable, which reports success
-       on a copy-on-write entry without materialising anything.  Measured with
-       the opt-outs still in place: --no-hwfault produced no output at all,
-       --no-peru panicked from c0054c1c, and both off stopped in the fork stub.
-
-       Turning them on for the hand-load path (--handload, procexp without
-       procexec) is free -- measured instruction-identical, because that path
-       pre-loads its image and so takes no user faults. */
+    /* ★ procexp ALWAYS implies real MC88100 access-fault delivery and
+       per-process u-areas; neither is optional, and the branches that need them
+       test procexp directly.  Without per-process u-areas, curproc still names
+       the parent after a fork and the first sleep panics.  Without real fault
+       delivery the resolver must call vm_map_pageable, which reports success on
+       a copy-on-write entry without materialising anything.  Free for the
+       hand-load path, which pre-loads its image and takes no user faults. */
 
     /* --uprog/--shell (i.e. procexec) run the kernel's own exec, which needs
        kernel memory to be coherent -- so it implies --dataphys.  It also
@@ -287,22 +259,14 @@ int main(int argc, char **argv)
                 uenvp[nuenvp++] = "SHELL=/bin/sh";
             }
         }
-        /* ★ THE IMAGE ALREADY CONTAINS THE KERNEL, so it can be the only file.
-           `sys tapeimage.img' boots the /vmunix inside the tape's own
-           filesystem and mounts that same filesystem as root -- one file, no
-           host-side copy of a kernel that the image already carries (verified
-           identical to the extracted one, byte for byte).  --kernel=PATH picks
-           a different one out of the image.
+        /* ★ THE IMAGE CONTAINS THE KERNEL, so it is the only file needed:
+           `sys tapeimage.img' boots the /vmunix inside it and mounts that same
+           filesystem as root.  --kernel=PATH picks a different one out of it.
 
-           Loading a standalone vmunix from the host used to be the only way in,
-           and is deliberately gone.  It bought nothing -- the image already
-           carries a byte-identical copy of that kernel, and booting either way
-           was instruction-identical -- while costing a whole class of
-           confusion: the root filesystem then had to be GUESSED from the
-           kernel's path, by rules that silently produced nonsense when the two
-           were not laid out the way the guess expected, and the failure
-           surfaced thousands of instructions later as `cannot mount root'.
-           There is nothing left to guess. */
+           A standalone kernel is deliberately not accepted.  It would leave the
+           root filesystem to be GUESSED from the kernel's path -- silently
+           wrong for any layout the guess did not expect, and surfacing
+           thousands of instructions later as `cannot mount root'. */
         {
             FILE *ki = fopen(path, "rb");
             const char *kp = kernel_path ? kernel_path : "/vmunix";
@@ -326,10 +290,9 @@ int main(int argc, char **argv)
         if (root_img)
             dbg("root image: %s (open)\n", root_img_path);
         else
-            /* Only reachable through --tape= now, since the booted image was
-               opened successfully a few lines above.  Say what it will cause:
-               the kernel's own complaint arrives thousands of instructions
-               later and names nothing that points back here. */
+            /* Only reachable via --tape=, the booted image having opened
+               above.  Name the consequence: the kernel's own complaint comes
+               thousands of instructions later and points nowhere near here. */
             fprintf(stderr, "root image: %s could not be opened -- disk reads "
                     "will return zeros and the kernel will panic with "
                     "`vfs_mountroot: cannot mount root'\n", root_img_path);

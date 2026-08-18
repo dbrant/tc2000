@@ -8,19 +8,15 @@
 
 int main(int argc, char **argv);
 
-/* ★ The page does NOT start the emulator through Emscripten's callMain.
-   With -sASYNCIFY, main() unwinds the moment the guest first reads the console
-   and returns to JS long before the machine has stopped -- so callMain's return
-   value says nothing, and the exit code and the "machine halted" moment are
-   both lost.  Going through an ordinary exported function instead lets the page
-   use ccall(..., {async: true}), which hands back a Promise that settles when
-   main() has REALLY returned.
+/* ★ The page does NOT start the emulator through Emscripten's callMain: under
+   -sASYNCIFY, main() unwinds at the guest's first console read and returns to
+   JS long before the machine stops, losing the exit code and the "halted"
+   moment.  An ordinary exported function lets the page use
+   ccall(..., {async: true}), whose Promise settles when main() really returns.
 
-   Splitting the command line here rather than in JS is the other half of it:
-   the page never has to marshal an argv into the heap, and the arguments it
-   passes are the same words BOOT.md documents.  Splitting is on whitespace
-   only -- there is no quoting -- which covers every flag the emulator has,
-   none of which take an argument containing a space. */
+   Splitting the command line here spares the page marshalling an argv into the
+   heap, and takes the same words BOOT.md documents.  Whitespace only, no
+   quoting: no flag takes an argument containing a space. */
 #define WEB_MAXARGS 64
 static char web_cmd[1024];      /* argv points INTO this; must outlive the run,
                                    and must not be ccall's temporary stack copy,
