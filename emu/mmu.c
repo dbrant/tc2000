@@ -106,11 +106,6 @@ int mmu_walk(u32 apr, u32 vaddr, u32 *phys, u32 *pd_out)
 {
     u32 segtab = apr & 0xFFFFF000u;
     if (!segtab) return 0;
-    if (ileave_stub && !realmm && (segtab & 0xC0000000u) == 0x80000000u &&
-        !mem_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4)) {
-        segtab = DATA_SEGTAB;
-        ileave_redirects++;
-    }
     int biased = ktab_bias && vaddr < 0xC0000000u;
     u32 sdesc = tab_r32(segtab + ((vaddr >> 22) & 0x3FF) * 4, biased);
     if (!(sdesc & 1)) return 0;                       /* segment invalid */
@@ -153,11 +148,10 @@ int walk_fb(u32 apr, u32 vaddr, int code, u32 *phys, u32 *pd_out)
         if (dp) { *phys = dp | (vaddr & 0xFFF); return 1; }
     }
     /* Fall back to the synthetic table on ANY miss (segment- or page-level) in
-       the kernel's own table.  The kernel's table is only partially populated
-       in our model, so a present segment descriptor with a missing page entry
-       would otherwise fail even though the address is really mapped.  Applies
-       to both realmm (direct map) and the identity path (--ileave). */
-    if (realmm || ileave_stub) {
+       the kernel's own table.  That table is only partially populated in this
+       model, so a present segment descriptor with a missing page entry would
+       otherwise fail even though the address is really mapped. */
+    if (realmm) {
         u32 syn = code ? CODE_SEGTAB : DATA_SEGTAB;
         if (mmu_walk(syn | 1, vaddr, phys, pd_out)) return 1;
         if (vaddr >= 0xE0000000u) { *phys = vaddr; return 1; }

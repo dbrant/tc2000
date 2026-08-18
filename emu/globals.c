@@ -5,7 +5,8 @@
 
 u8 **pages;
 /*
- * Real-memory model (--realmm): the kernel runs at true physical addresses.
+ * Real-memory model: the kernel runs at true physical addresses.  Set for
+ * `sys' mode; 0 in `user' mode, which has no kernel and no translation.
  * On a single node the switch's interleaved view (mode bit 0x80000000) and the
  * node-local view alias the same RAM, so interleaved physical addresses
  * 0x80000000-0xBFFFFFFF fold onto node-local 0x00000000-0x3FFFFFFF.  Doing this
@@ -165,22 +166,6 @@ u32 ptpool_next = PTPOOL;
 u32 fl_stride = 0x2000;
 u32 tcs_mbox_pa = TCS_MBOX;
 u64 tcs_commands;
-/*
- * Interleaver stub.
- *
- * The kernel relocates its page tables into interleaved memory (physical mode
- * 2, 0x8xxxxxxx) and points the APR there -- but on a single-node machine
- * there is nothing to interleave across, and the emulator has no separate
- * backing for that space, so the walk reads zeros.  A scan of all 5481 live
- * pages confirms the kernel never actually populated a table there.
- *
- * With one node, interleaved memory is just local memory under a different
- * name, so an empty mode-2 segment table falls back to the identity table the
- * synthetic boot loader built.  This is a stand-in for a real interleaver
- * model, not a substitute for one.
- */
-int ileave_stub;
-u64 ileave_redirects;
 /*
  * Address translation.
  *

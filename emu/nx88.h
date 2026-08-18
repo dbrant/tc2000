@@ -269,8 +269,6 @@ extern u32 ptpool_next ;
 extern u32 fl_stride ;
 extern u32 tcs_mbox_pa ;
 extern u64 tcs_commands;
-extern int ileave_stub;
-extern u64 ileave_redirects;
 extern int translate_on;
 extern u64 xlat_faults;
 extern u32 last_fault_va, last_fault_pc;

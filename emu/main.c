@@ -27,7 +27,7 @@ int main(int argc, char **argv)
 
     u64 limit = 200000000ull;
     u32 sig = 'A';                     /* node EEPROM signature: 16MB + vmebus present */
-    int mode_sys = 0, identity_mode = 0, i = 1, tickdiv_set = 0;
+    int mode_sys = 0, i = 1, tickdiv_set = 0;
     int color_mode = 0;                  /* 0 auto, 1 --color, -1 --no-color */
     const char *path = NULL;
 
@@ -45,7 +45,6 @@ int main(int argc, char **argv)
         else if (!strncmp(argv[i], "--disk=", 7))  disk_img_path = argv[i]+7;
         else if (!strncmp(argv[i], "--hostfile=", 11)) hostfile_path = argv[i]+11;
         else if (!strcmp(argv[i], "--scsi"))       sha_desc_clear = 0x14;
-        else if (!strcmp(argv[i], "--identity"))   identity_mode = 1;
         else if (!strcmp(argv[i], "--clock"))      clock_irq = 1;
         else if (!strncmp(argv[i], "--clock=", 8)) { clock_irq = 1; clock_period = strtoull(argv[i]+8,0,0); }
         else if (!strncmp(argv[i], "--tickdiv=", 10))
@@ -174,7 +173,7 @@ int main(int argc, char **argv)
                 "       nx88 sys  <image> [--limit=N] [--scsi] [--shell] [--kmsg]\n"
                 "                         [--debug] [--kernel=PATH] [--uprog=PATH]\n"
                 "                         [--handload=HOSTPATH]\n"
-                "                         [--nodes=N] [--identity]\n"
+                "                         [--nodes=N]\n"
                 "                         [--tape=PATH] [--disk=PATH]\n"
                 "                         [--console-port=N]\n"
                 "  <image>      a 4.3BSD filesystem image to boot -- e.g. the\n"
@@ -232,16 +231,12 @@ int main(int argc, char **argv)
                 "               works it forks a child that READS fd 0 -- so it\n"
                 "               competes with --uprog for the console and eats\n"
                 "               the script's input.\n"
-                "  sys mode defaults to the real-memory model with EEPROM signature\n"
-                "  'A'; pass --identity for the superseded identity path.\n");
+                "  sys mode runs the real-memory model, EEPROM signature 'A'.\n");
         return 2;
     }
-    /* realmm is the primary, sound path -- default it on in system mode.
-       --identity selects the superseded identity+fallback path instead. */
     if (mode_sys) {
         translate_on = 1;
-        ileave_stub  = 1;
-        realmm = !identity_mode;
+        realmm       = 1;
         /* --shell: everything else follows.  The path is a GUEST path now --
            the kernel's execve resolves it in its own namespace. */
         if (interactive && !uprog_path) {

@@ -54,8 +54,8 @@ Under MSYS2 bash, prefix the command with `MSYS2_ARG_CONV_EXCL='*'` (and then
 give host paths in Windows form, since those genuinely do need converting).
 PowerShell and cmd are unaffected.
 
-Defaults: the **real-memory model** (the default) with translation and EEPROM
-signature `'A'`.  `--identity` selects the superseded identity+fallback path.
+The machine runs the **real-memory model** with translation and EEPROM
+signature `'A'`.
 Useful flags: `--scsi` (configure the SCSI disk / enable the sd0 path),
 `--scsitrace`, `--clock`, `--pchist` (dump the last 64K PCs at halt — the tool
 that cracked several blockers), `--watch=PC`, `--nodes=N`, and the two image
