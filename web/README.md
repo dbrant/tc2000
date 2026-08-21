@@ -6,7 +6,8 @@ tape into an interactive `/bin/sh` — inside a page, in a `<div>`.
     ./build.sh          # needs emsdk on PATH
     ./serve.py          # then open http://localhost:8000/
 
-`index.html` is the demo page. Everything else here is the embeddable part.
+`index.html` and `index.css` are the demo page. Everything else here is the
+embeddable part.
 
 Every script here anchors itself to this directory, so the working directory
 never matters — from the repo root it is just:

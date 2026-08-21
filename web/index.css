@@ -1,0 +1,40 @@
+/* index.css -- chrome for the demo page around the emulator. */
+
+:root { color-scheme: dark; }
+
+body {
+  margin: 0;
+  padding: 32px 20px 64px;
+  background: #0b0d0c;
+  color: #b8ccbc;
+  font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main { max-width: 900px; margin: 0 auto; }
+
+h1 { margin: 0 0 4px; font-size: 26px; color: #e2f2e2; letter-spacing: -0.01em; }
+h2 { margin: 36px 0 10px; font-size: 15px; color: #cfe6d0; text-transform: uppercase; letter-spacing: 0.08em; }
+p { margin: 0 0 12px; }
+a { color: #8fdf7a; }
+
+.sub { margin: 0 0 28px; color: #7f9583; font-size: 14px; }
+.note { color: #7f9583; font-size: 13.5px; }
+
+#machine { height: 560px; }
+
+code, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
+code { color: #9fdca0; }
+kbd { padding: 1px 5px; border: 1px solid #33403a; border-radius: 4px; background: #161a18; color: #cfe6d0; }
+
+pre {
+  overflow-x: auto;
+  padding: 14px;
+  background: #121614;
+  border: 1px solid #262f2b;
+  border-radius: 6px;
+}
+
+ul { margin: 0 0 12px; padding-left: 22px; }
+li { margin: 3px 0; }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 32px; }
