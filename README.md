@@ -19,9 +19,8 @@ Tue Nov 28 19:07:37 EST 1989
 ```
 
 No boot ROM survives, and there is no source for the kernel and no register map
-for the hardware — the machine model was inferred from what the kernel *does*
-when you run it, one blocker at a time. The instruction set was worked out the
-same way, from the kernel binary itself.
+for the hardware. The machine model was inferred from what the kernel *does*
+when it's run. The instruction set was worked out the same way, from the kernel binary itself.
 
 It also [runs in a browser](web/).
 
@@ -29,8 +28,7 @@ It also [runs in a browser](web/).
 
 ## Quick start
 
-You need exactly one file that is data, not code, and is not in this repo: the
-dumped tape image, `tapeimage.img`.
+The only thing necessary (which is not included in this repo) is an actual dump of a bootable tape image, `tapeimage.img`.
 
 ```sh
 ./emu/build.sh                                  # any C compiler; see below
@@ -43,9 +41,7 @@ then mounts that same image as root. `--kernel=PATH` boots a different one from
 within the image.
 
 `--shell` boots the kernel and hands your terminal to `/bin/sh` off the boot
-image; `--kmsg` shows the kernel's own console log. The kernel reaches a mounted
-root in about 3.7 million emulated instructions, which at ~25 million
-instructions/second is a fraction of a second.
+image; `--kmsg` shows the kernel's own console log.
 
 ```
 # ls /bin
@@ -60,21 +56,20 @@ root::0:10::/:/bin/sh
 ```
 
 `cd`, `ls`, `cat`, `grep`, `df`, pipelines, `$?` and shell variables all work.
-The filesystem is genuinely the tape's UFS, read block by block through the
-kernel's own code, so only what shipped on the installer is there. **Ctrl-D**
-halts the machine (`exit` will not — this shell runs it and carries on).
+The filesystem is genuinely the tape's UFS. **Ctrl-D**
+halts the machine (`exit` will not; this shell runs it and carries on).
 
 On Windows, build under MSYS2:
 `export PATH="/c/msys64/ucrt64/bin:$PATH"`. The binary is `nx88.exe` there and
 plain `nx88` elsewhere, but every command in these docs is written `./nx88` and
-works on all three — MSYS, Cygwin, cmd and PowerShell all append the extension
+works on all three. MSYS, Cygwin, cmd and PowerShell all append the extension
 when resolving a program name.
 
 ---
 
 ## The machine
 
-BBN — Bolt, Beranek and Newman, the company that built the ARPANET's routers —
+BBN (Bolt, Beranek and Newman, the company that built the ARPANET's routers)
 was commissioned by DARPA in 1978 to design a parallel computer. What came out
 of it was the **Butterfly**, named for the shape of its interconnect: the wiring
 topology of its multistage switching network resembles the FFT butterfly
@@ -93,19 +88,15 @@ was the only machine BBN was still actively selling.
 
 ### Architecture
 
-Each node carried a 20 MHz **Motorola 88100** RISC processor — Motorola's
-short-lived 88000 architecture, big-endian, with explicit branch delay slots —
+Each node carried a 20 MHz **Motorola 88100** RISC processor (Motorola's
+short-lived 88000 architecture, big-endian, with explicit branch delay slots)
 paired with **88200 CMMUs** for translation and caching, plus its own local
 memory. Up to 512 of these plugged into the **butterfly switch**, built from
 8×8 crossbar modules.
 
 The result was shared memory, but not uniform shared memory. Every processor
 could address every other processor's memory through the switch, at roughly
-**15× the latency** of its own. That single ratio is the whole design problem of
-the machine, and it shows up everywhere in nX — in the `fork_and_bind` call that
-pins a child process to a chosen node, in the "cluster" abstraction that carves
-the machine into groups, and in the per-node buffer-cache accounting the kernel
-prints at boot.
+**15× the latency** of its own. This eyebrow-raising ratio is the real design problem of the machine, and it shows up everywhere in nX — in the `fork_and_bind` call that pins a child process to a chosen node, in the "cluster" abstraction that carves the machine into groups, and in the per-node buffer-cache accounting the kernel prints at boot.
 
 Physical addresses carry a node number in them:
 
@@ -113,7 +104,7 @@ Physical addresses carry a node number in them:
 [mode:31-30][node:29-23][offset:22-0]      mode 3 = node-local, 2 = interleaved
 ```
 
-Nodes are named by physical position — `Bay.Midplane.Node` — which is why the
+Nodes are named by physical position (`Bay.Midplane.Node`) which is why the
 boot log talks about `processor node 0.7.7`. A separate **TCS** (Test & Control
 System), reached through a shared-memory mailbox, handled per-node control and
 diagnostics. I/O hung off VMEbus; the boot disk is SCSI behind an Interphase
@@ -126,8 +117,7 @@ nX is **4.3 BSD userland and syscalls over a Mach VM layer** (`vm_map`, `pmap_*`
 late-80s BSD: terminals are `sgtty`, not termios; binaries are a.out; `/bin/sh`
 is the Bourne shell.
 
-The kernel in this repository is build **#191, dated 28 November 1989** — about
-four months after the TC2000 was announced.
+The kernel found on the tape that this repository is intended to boot is build **#191, dated 28 November 1989** — about four months after the TC2000 was announced.
 
 ---
 
@@ -150,7 +140,7 @@ By default the emulator says **nothing**. What you see is what the machine said:
 ./nx88 sys tapeimage.img --shell --debug   # + the emulator's commentary
 ```
 
-`--debug` unlocks the load map, the synthetic boot tables, the process
+`--debug` shows the load map, the synthetic boot tables, the process
 experiment's register dumps, `[kfall]`/`[halt]`/`[PANIC]` and the closing
 instruction count. Every *other* diagnostic flag turns it on for itself, so no
 command line prints less than it did before the gate existed; `--quiet` turns it
@@ -249,8 +239,8 @@ proc`) turned out to be a buffer-cache completion gap, `biowait` never seeing
 ## How it was worked out
 
 `tools/` is the archaeology, in Python, and it came first. The 88100 decoder was
-not written from a manual; it was **inferred from the kernel binary and then
-tested against it**:
+not written from a manual; it was inferred from the kernel binary and then
+tested against it:
 
 - `triadic.py` histograms the 11-bit function field over real kernel text and
   pins meanings with positional anchors — the word that most often *ends* a
@@ -284,8 +274,8 @@ tools/      the Python archaeology: decoder, disassembler, a.out and
             stabs readers, syscall-table recovery, validation oracles
 ```
 
-The tape data — `tapeimage.img`, `disk.img` and all the recovered
-archives — are not in the repository.
+The tape data (`tapeimage.img`, `disk.img` and all the recovered
+archives) are not in the repository.
 
 ## Status
 
