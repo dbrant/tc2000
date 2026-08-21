@@ -15,27 +15,24 @@
 
   <h1>BBN TC2000</h1>
   <p class="sub">
-    An MC88100 emulator running nX — BBN&rsquo;s 4.3BSD for the Butterfly TC2000 —
-    booted from a 1989 install tape, compiled to WebAssembly.
+    An MC88100 emulator running nX — BBN's 4.3 BSD for the Butterfly TC2000 —
+    booted from a 1989 install tape, compiled to WebAssembly.<br />
+    <a href="https://github.com/dbrant/tc2000" target="_blank">Source code</a>
   </p>
 
   <tc2000-console id="machine"></tc2000-console>
 
   <h2>What you are looking at</h2>
   <p>
-    Pressing <b>Boot the machine</b> downloads the kernel and the tape&rsquo;s UFS
-    filesystem (about 9 MB), then starts the emulator at the kernel&rsquo;s entry
-    point. Every <code>[nx]</code> line that scrolls past is the kernel talking
-    — sizing memory, probing the VMEbus, configuring SCSI, noticing that the
-    time-of-day clock is missing and setting the date from the filesystem
-    instead. The emulator&rsquo;s own commentary is switched off; you are reading
-    what the machine said in 1989.
+    Pressing <b>Boot the machine</b> downloads the kernel and the tape's UFS
+    filesystem, then starts the emulator at the kernel's entry
+    point. All of the <code>[nx]</code> messages are coming from the actual
+    kernel, exactly as it would have been seen on a real TC2000 in 1989.
   </p>
   <p>
     When the kernel reaches the point where the swapper goes idle, the emulator
-    starts <code>/bin/sh</code> off the tape as a genuine nX process — real
-    <code>execve</code>, real page faults, real scheduler — and hands it the
-    terminal.
+    starts <code>/bin/sh</code> off the tape as a genuine nX process, and routes
+    the terminal to it.
   </p>
 
   <h2>Things to try at the <code>#</code> prompt</h2>
@@ -60,19 +57,7 @@
     <b>Restart</b> in the status bar reboots it from cold at any point.
   </p>
 
-  <h2>Putting it in your own page</h2>
-  <p>Three tags and an element:</p>
-<pre><code>&lt;link rel="stylesheet" href="vendor/xterm.css"&gt;
-&lt;link rel="stylesheet" href="tc2000.css"&gt;
-&lt;script src="vendor/xterm.js"&gt;&lt;/script&gt;
-&lt;script src="tc2000.js"&gt;&lt;/script&gt;
-
-&lt;tc2000-console style="height:560px"&gt;&lt;/tc2000-console&gt;</code></pre>
-  <p>
-    Add <code>autostart</code> to boot without the click. For the imperative
-    form, and for pointing the page at a different tape or a different
-    <code>nx88</code> command line, see <code>web/README.md</code>.
-  </p>
+  <footer><a href="https://dmitrybrant.com" target="_blank">Dmitry Brant</a>, 2026. (No affiliation with BBN)</footer>
 
 </main>
 

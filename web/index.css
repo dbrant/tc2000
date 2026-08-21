@@ -38,3 +38,14 @@ ul { margin: 0 0 12px; padding-left: 22px; }
 li { margin: 3px 0; }
 
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 32px; }
+
+footer {
+  margin-top: 48px;
+  padding-top: 16px;
+  border-top: 1px solid #1d2422;
+  color: #6d8271;
+  font-size: 13px;
+  text-align: center;
+}
+/* The one warm thing on the page; the emoji's own colour, not the text ink. */
+.heart { color: #e2536a; font-style: normal; }

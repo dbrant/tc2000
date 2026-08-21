@@ -251,7 +251,7 @@
     else {
       setPhase('idle', 'Ready');
       showOverlay('BBN TC2000',
-                  'Boot nX from the 1989 install tape. About 9 MB to download.',
+                  'Boot nX from the 1989 install tape.',
                   'Boot the machine', start);
     }
 
